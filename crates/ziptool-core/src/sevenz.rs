@@ -76,7 +76,12 @@ pub(crate) fn compress(items: &[Item], output: &Path, opts: &CompressOptions, pr
     let threads = crate::util::threads_for(dict * 12 + dict * 4);
     let lzma2 = Lzma2Options::from_level_mt(level, threads, dict * 4);
     match &opts.password {
-        Some(pw) => w.set_content_methods(vec![AesEncoderOptions::new(Password::from(pw.as_str())).into(), lzma2.into()]),
+        Some(pw) => {
+            // 金鑰延伸次數與 7-Zip 相同（2^19 次 SHA-256）；函式庫預設只有 2^8，密碼容易被暴力破解
+            let mut aes = AesEncoderOptions::new(Password::from(pw.as_str()));
+            aes.num_cycles_power = 19;
+            w.set_content_methods(vec![aes.into(), lzma2.into()])
+        }
         None => w.set_content_methods(vec![lzma2.into()]),
     };
     w.set_encrypt_header(opts.encrypt_names);
@@ -200,4 +205,24 @@ pub(crate) fn list(archive: &Path, pw: Option<&str>) -> Result<Vec<Entry>> {
             encrypted: encrypted_block(i),
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 加密的金鑰延伸次數要與 7-Zip 相同（2^19 次 SHA-256），否則密碼容易被暴力破解
+    #[test]
+    fn aes_key_stretching_matches_7zip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("a.txt");
+        std::fs::write(&src, "secret").unwrap();
+        let ar = tmp.path().join("a.7z");
+        let opts = CompressOptions { password: Some("pw".into()), ..Default::default() };
+        crate::compress(&[src], &ar, crate::Format::SevenZ, &opts, &crate::NoProgress).unwrap();
+
+        let archive = Archive::read(&mut File::open(&ar).unwrap(), &Password::from("pw")).unwrap();
+        let aes = archive.blocks.iter().flat_map(|b| &b.coders).find(|c| c.encoder_method_id() == [0x06, 0xF1, 0x07, 0x01]).expect("應有 AES 加密");
+        assert_eq!(aes.properties()[0] & 0x3F, 19, "金鑰延伸次數應為 2^19");
+    }
 }
