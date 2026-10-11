@@ -167,3 +167,26 @@ fn usage_errors_exit_7() {
     assert_eq!(run(t.path(), &["a", "x.7z", "-mx12"], "").status.code(), Some(7));
     assert_eq!(run(t.path(), &["a", "x.7z", "-zz"], "").status.code(), Some(7));
 }
+
+/// 惡意壓縮檔可以在檔名中放入終端機控制字元（清除畫面、移動游標、改視窗標題、反轉文字方向），
+/// 偽造列出的內容或蓋掉警告。輸出前必須轉成看得見的跳脫形式。
+#[test]
+fn control_characters_in_names_are_escaped() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ar = tmp.path().join("evil.zip");
+    {
+        let mut z = zip::ZipWriter::new(fs::File::create(&ar).unwrap());
+        let o = zip::write::SimpleFileOptions::default();
+        for name in ["\x1b[2J\x1b[32m一切正常", "a\rb.txt", "\x1b]0;PWNED\x07t.txt", "doc\u{202E}txt.exe", "c\u{9b}31m.txt", "../\x1b[1A\x1b[2Kx.txt"] {
+            z.start_file(name, o).unwrap();
+            z.write_all(b"x").unwrap();
+        }
+        z.finish().unwrap();
+    }
+    let bad = |s: &str| s.chars().any(|c| (c.is_control() && c != '\n') || c == '\u{202E}');
+    let l = run(tmp.path(), &["l", "evil.zip"], "");
+    assert!(!bad(&text(&l)), "{:?}", text(&l));
+    assert!(text(&l).contains(r"\u{1b}[2J"), "{}", text(&l));
+    let x = run(tmp.path(), &["x", "-y", "-oout", "evil.zip"], "");
+    assert!(!bad(&text(&x)), "{:?}", text(&x));
+}

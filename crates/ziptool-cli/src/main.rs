@@ -178,7 +178,7 @@ impl Progress for Bar {
         self.0.inc(n);
     }
     fn entry(&self, name: &str) {
-        self.0.set_message(name.to_string());
+        self.0.set_message(clean(name));
     }
     /// 與 7z 相同的同名檔詢問；輸入結束（非互動執行）時視為「全部略過」，不會誤刪資料。
     fn ask_overwrite(&self, path: &Path) -> OverwriteAnswer {
@@ -186,7 +186,7 @@ impl Progress for Bar {
             loop {
                 eprint!(
                     "\n檔案已存在：{}\n要取代嗎？(Y)是 / (N)否 / (A)全部是 / (S)全部略過 / (U)全部自動改名 / (Q)中止：",
-                    path.display()
+                    clean(&path.display().to_string())
                 );
                 let mut line = String::new();
                 if matches!(std::io::stdin().read_line(&mut line), Ok(0) | Err(_)) {
@@ -217,6 +217,22 @@ impl std::fmt::Display for Warnings {
 }
 
 impl std::error::Error for Warnings {}
+
+/// 壓縮檔內的名稱可能含有終端機控制字元（清除畫面、移動游標、改視窗標題）或反轉文字方向的字元，
+/// 惡意檔案可藉此偽造輸出或蓋掉警告。輸出前一律轉成看得見的跳脫形式，例如 `\u{1b}`。
+fn clean(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            let bidi = matches!(c, '\u{200E}' | '\u{200F}' | '\u{061C}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}');
+            if c.is_control() || bidi { c.escape_unicode().to_string() } else { c.to_string() }
+        })
+        .collect()
+}
+
+/// 可能含有名稱的多行訊息（例如錯誤說明）：保留換行，其餘控制字元跳脫
+fn clean_lines(s: &str) -> String {
+    s.split('\n').map(clean).collect::<Vec<_>>().join("\n")
+}
 
 fn confirm(question: &str) -> bool {
     eprint!("{question} (y/N)：");
@@ -381,7 +397,7 @@ fn cmd_extract(a: &Args, flatten: bool) -> anyhow::Result<()> {
         }
     };
     for i in &report.issues {
-        eprintln!("警告：{}：{}", i.name, i.reason);
+        eprintln!("警告：{}：{}", clean(&i.name), clean_lines(&i.reason));
     }
     println!(
         "已解壓縮到：{}（{} 個檔案，{}，{:.1} 秒）",
@@ -428,7 +444,7 @@ fn cmd_list(a: &Args) -> anyhow::Result<()> {
             format_time(e.modified),
             if e.is_dir { String::new() } else { num(e.size) },
             if e.is_dir { String::new() } else { num(e.compressed_size) },
-            e.name
+            clean(&e.name)
         );
         if e.is_dir {
             dirs += 1;
@@ -493,11 +509,11 @@ fn main() -> ExitCode {
     match res {
         Ok(()) => ExitCode::from(exit::OK),
         Err(e) if e.downcast_ref::<Warnings>().is_some() => {
-            eprintln!("{e}");
+            eprintln!("{}", clean_lines(&e.to_string()));
             ExitCode::from(exit::WARNING)
         }
         Err(e) => {
-            eprintln!("錯誤：{e:#}");
+            eprintln!("錯誤：{}", clean_lines(&format!("{e:#}")));
             ExitCode::from(exit::FATAL)
         }
     }
