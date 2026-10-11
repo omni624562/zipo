@@ -5031,7 +5031,7 @@ dependencies = [
 
 [[package]]
 name = "ziptool"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "indicatif",
@@ -5043,7 +5043,7 @@ dependencies = [
 
 [[package]]
 name = "ziptool-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bzip2",
  "encoding_rs",
@@ -5062,7 +5062,7 @@ dependencies = [
 
 [[package]]
 name = "ziptool-gui"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "eframe",
  "egui-phosphor",
