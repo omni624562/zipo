@@ -149,6 +149,26 @@ pub(crate) fn part_path(path: &Path) -> PathBuf {
     path.with_file_name(name)
 }
 
+/// 解壓縮用的暫存檔：名稱加上隨機部分，並以「必須是新檔案」的方式建立。
+/// 固定的名稱會與壓縮檔內的同名項目或資料夾中原有的檔案相撞（覆寫它們），
+/// 若該名稱是預先放好的符號連結，還會被導到解壓縮資料夾之外。
+fn create_part(target: &Path) -> io::Result<(PathBuf, File)> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    for _ in 0..100 {
+        let nanos = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
+        let tag = (u64::from(std::process::id()) << 32 | u64::from(nanos)) ^ SEQ.fetch_add(1, Ordering::Relaxed).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        // 名稱不含原檔名：原檔名接近 255 字元上限時，加長的暫存檔名會超過上限
+        let part = target.with_file_name(format!("{tag:016x}.ziptool-part"));
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&part) {
+            Ok(f) => return Ok((part, f)),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::from(io::ErrorKind::AlreadyExists))
+}
+
 /// 人類可讀的大小，例如 `1.5 GB`。
 pub fn format_size(n: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
@@ -327,9 +347,8 @@ impl<'a> Planner<'a> {
     /// 寫入錯誤（權限、路徑）記錄後略過此檔，並把剩下的資料讀完，避免後續項目錯位。
     pub fn write_file(&self, name: &str, path: &Path, r: &mut dyn Read, mtime: Option<SystemTime>, unix_mode: Option<u32>) -> Result<()> {
         let Some(target) = self.resolve_target(name, path)? else { return drain(r) };
-        let part = part_path(&target);
-        let mut file = match File::create(&part) {
-            Ok(f) => f,
+        let (part, mut file) = match create_part(&target) {
+            Ok(x) => x,
             Err(e) => {
                 self.issue(name, describe(&e));
                 return drain(r);

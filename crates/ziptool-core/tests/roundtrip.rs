@@ -910,3 +910,50 @@ fn update_keeps_mark_of_the_web() {
         assert_eq!(fs::read_to_string(&ads).ok().as_deref(), Some(zone), "{f:?}");
     }
 }
+
+/// 解壓時的暫存檔名不可與壓縮檔內的項目或資料夾中原有的檔案相撞
+/// （原本固定為「檔名.ziptool-part」，項目會被下一個同名暫存檔吃掉，原有的同名檔案也會被覆寫）。
+#[test]
+fn temp_files_never_collide_with_entries() {
+    use std::io::Write;
+    let tmp = tempfile::tempdir().unwrap();
+    let ar = tmp.path().join("part.zip");
+    {
+        let mut z = zip::ZipWriter::new(fs::File::create(&ar).unwrap());
+        let o = zip::write::SimpleFileOptions::default();
+        for (name, data) in [("a.txt.ziptool-part", "第一個"), ("a.txt", "第二個")] {
+            z.start_file(name, o).unwrap();
+            z.write_all(data.as_bytes()).unwrap();
+        }
+        z.finish().unwrap();
+    }
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+    fs::write(out.join("b.txt.ziptool-part"), "使用者原有的檔案").unwrap();
+    let r = extract(&ar, &out, &ExtractOptions::default(), &NoProgress).unwrap();
+    assert_eq!(r.files, 2);
+    assert_eq!(fs::read_to_string(out.join("a.txt.ziptool-part")).unwrap(), "第一個");
+    assert_eq!(fs::read_to_string(out.join("a.txt")).unwrap(), "第二個");
+    assert_eq!(fs::read_to_string(out.join("b.txt.ziptool-part")).unwrap(), "使用者原有的檔案");
+    // 不留下任何暫存檔
+    let names: Vec<String> = fs::read_dir(&out).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    assert_eq!(names.len(), 3, "{names:?}");
+}
+
+/// 檔名接近 255 字元上限時，暫存檔名不可因加長而超過上限
+#[test]
+fn max_length_file_names_extract() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    fs::create_dir(&src).unwrap();
+    let long = format!("{}.txt", "長".repeat(251));
+    fs::write(src.join(&long), "x").unwrap();
+    for f in [Format::Zip, Format::Tar, Format::SevenZ] {
+        let ar = tmp.path().join(format!("l.{}", f.extension()));
+        compress(std::slice::from_ref(&src), &ar, f, &CompressOptions::default(), &NoProgress).unwrap();
+        let out = tmp.path().join(format!("out-{}", f.extension()));
+        let r = extract(&ar, &out, &ExtractOptions::default(), &NoProgress).unwrap();
+        assert!(r.issues.is_empty(), "{f:?}: {:?}", r.issues);
+        assert_eq!(fs::read_to_string(out.join("src").join(&long)).unwrap(), "x", "{f:?}");
+    }
+}
