@@ -18,6 +18,143 @@ fn map_err(e: sevenz_rust2::Error) -> Error {
     }
 }
 
+/// 壓縮過的目錄資料（encoded header）解壓縮後的上限。數百萬個項目的目錄也遠小於此；
+/// 惡意檔案可以用很小的檔案宣告巨大的目錄，讓函式庫解壓縮時耗盡記憶體。
+const MAX_HEADER_UNPACK: u64 = 256 << 20;
+
+/// 在交給函式庫之前，先讀出壓縮過的目錄資料宣告的解壓縮大小，過大就拒絕。
+fn check_header_size(archive: &Path) -> Result<()> {
+    let declared = match encoded_header_unpack_size(archive) {
+        Ok(n) => n,
+        // 格式不符的檔案交給函式庫回報正確的錯誤
+        Err(_) => return Ok(()),
+    };
+    if declared > MAX_HEADER_UNPACK {
+        return Err(Error::SevenZ(format!("目錄資料宣告為 {}，異常龐大，可能是惡意檔案", crate::format_size(declared))));
+    }
+    Ok(())
+}
+
+/// 依 7z 格式解析 encoded header 的 StreamsInfo，回傳其中最大的解壓縮大小；目錄未壓縮時回傳 0。
+fn encoded_header_unpack_size(archive: &Path) -> io::Result<u64> {
+    use std::io::{Seek, SeekFrom};
+    let bad = || io::Error::from(io::ErrorKind::InvalidData);
+    let mut f = File::open(archive)?;
+    let len = f.metadata()?.len();
+    let mut start = [0u8; 32];
+    f.read_exact(&mut start)?;
+    let offset = u64::from_le_bytes(start[12..20].try_into().unwrap());
+    let size = u64::from_le_bytes(start[20..28].try_into().unwrap());
+    let pos = offset.checked_add(32).filter(|p| p.checked_add(size).is_some_and(|end| end <= len)).ok_or_else(bad)?;
+    // 只需要開頭的 StreamsInfo；最多讀 64 KB
+    let mut buf = vec![0u8; size.min(64 << 10) as usize];
+    f.seek(SeekFrom::Start(pos))?;
+    f.read_exact(&mut buf)?;
+
+    let mut r = buf.as_slice();
+    let byte = |r: &mut &[u8]| -> io::Result<u8> {
+        let (&b, rest) = r.split_first().ok_or_else(bad)?;
+        *r = rest;
+        Ok(b)
+    };
+    // 7z 的可變長度整數
+    let number = |r: &mut &[u8]| -> io::Result<u64> {
+        let first = byte(r)?;
+        let mut mask = 0x80u8;
+        let mut value = 0u64;
+        for i in 0..8 {
+            if first & mask == 0 {
+                return Ok(value | (u64::from(first & mask.wrapping_sub(1)) << (8 * i)));
+            }
+            value |= u64::from(byte(r)?) << (8 * i);
+            mask >>= 1;
+        }
+        Ok(value)
+    };
+    const K_END: u8 = 0x00;
+    if byte(&mut r)? != 0x17 {
+        return Ok(0); // 目錄未壓縮：大小已受檔案長度限制
+    }
+    let mut largest = 0u64;
+    loop {
+        match byte(&mut r)? {
+            K_END => return Ok(largest),
+            0x06 => {
+                // PackInfo：位置、數量，以及可選的大小與 CRC，直到 kEnd
+                number(&mut r)?;
+                let n = number(&mut r)?;
+                loop {
+                    match byte(&mut r)? {
+                        K_END => break,
+                        0x09 => (0..n).try_for_each(|_| number(&mut r).map(drop))?,
+                        0x0A => {
+                            // CRC：全部都有，或以位元表標示哪些有；每個 4 位元組
+                            let defined = if byte(&mut r)? != 0 {
+                                n
+                            } else {
+                                let bits = r.get(..n.div_ceil(8) as usize).ok_or_else(bad)?;
+                                r = &r[bits.len()..];
+                                bits.iter().map(|b| u64::from(b.count_ones())).sum()
+                            };
+                            r = r.get(defined.saturating_mul(4) as usize..).ok_or_else(bad)?;
+                        }
+                        _ => return Err(bad()),
+                    }
+                }
+            }
+            0x07 => {
+                // UnpackInfo：kFolder、各資料夾的編碼器定義，接著 kCodersUnpackSize
+                if byte(&mut r)? != 0x0B {
+                    return Err(bad());
+                }
+                let folders = number(&mut r)?;
+                if byte(&mut r)? != 0 {
+                    return Err(bad()); // 外部資料，正常的目錄不會用到
+                }
+                let mut outputs = 0u64;
+                for _ in 0..folders {
+                    let (mut ins, mut outs) = (0u64, 0u64);
+                    for _ in 0..number(&mut r)? {
+                        let flags = byte(&mut r)?;
+                        let id_len = (flags & 0x0F) as usize;
+                        r = r.get(id_len..).ok_or_else(bad)?;
+                        if flags & 0x10 != 0 {
+                            ins += number(&mut r)?;
+                            outs += number(&mut r)?;
+                        } else {
+                            ins += 1;
+                            outs += 1;
+                        }
+                        if flags & 0x20 != 0 {
+                            let props = number(&mut r)? as usize;
+                            r = r.get(props..).ok_or_else(bad)?;
+                        }
+                    }
+                    let pairs = outs.checked_sub(1).ok_or_else(bad)?;
+                    for _ in 0..pairs.saturating_mul(2) {
+                        number(&mut r)?;
+                    }
+                    let packed = ins.checked_sub(pairs).ok_or_else(bad)?;
+                    if packed > 1 {
+                        for _ in 0..packed {
+                            number(&mut r)?;
+                        }
+                    }
+                    outputs = outputs.checked_add(outs).ok_or_else(bad)?;
+                }
+                if byte(&mut r)? != 0x0C {
+                    return Err(bad());
+                }
+                for _ in 0..outputs {
+                    largest = largest.max(number(&mut r)?);
+                }
+                return Ok(largest);
+            }
+            _ => return Err(bad()),
+        }
+    }
+}
+
 fn password(pw: Option<&str>) -> Password {
     pw.map(Password::from).unwrap_or_else(Password::empty)
 }
@@ -142,6 +279,7 @@ fn for_each(
     progress: &dyn Progress,
     mut f: impl FnMut(&ArchiveEntry, &mut dyn Read) -> Result<()>,
 ) -> Result<()> {
+    check_header_size(archive)?;
     let mut reader = ArchiveReader::new(BufReader::new(File::open(archive)?), password(pw)).map_err(map_err)?;
     // 解碼時每個執行緒最多需要一個字典（最大 64 MB）加上緩衝區
     reader.set_thread_count(crate::util::threads_for(160 << 20));
@@ -197,6 +335,7 @@ pub(crate) fn test(archive: &Path, pw: Option<&str>, progress: &dyn Progress) ->
 }
 
 pub(crate) fn list(archive: &Path, pw: Option<&str>) -> Result<Vec<Entry>> {
+    check_header_size(archive)?;
     let mut file = BufReader::new(File::open(archive)?);
     let ar = Archive::read(&mut file, &password(pw)).map_err(map_err)?;
     let encrypted_block = |i: usize| {
@@ -222,6 +361,40 @@ pub(crate) fn list(archive: &Path, pw: Option<&str>) -> Result<Vec<Entry>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 宣告巨大目錄資料的惡意檔案要在解壓縮前就被拒絕；正常的壓縮檔不受影響
+    #[test]
+    fn huge_encoded_header_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        // 最小的 encoded header：一個 LZMA2 資料夾，宣告解壓縮後 1 GiB
+        let header: Vec<u8> = vec![
+            0x17, 0x06, 0x00, 0x01, 0x09, 0x05, 0x00, // PackInfo：位置 0、1 個資料流、大小 5
+            0x07, 0x0B, 0x01, 0x00, // UnpackInfo：1 個資料夾
+            0x01, 0x01, 0x21, // 1 個編碼器（LZMA2）
+            0x0C, 0xF0, 0x00, 0x00, 0x00, 0x40, // 解壓縮大小 1 GiB
+            0x00, 0x00,
+        ];
+        let mut bytes = vec![b'7', b'z', 0xBC, 0xAF, 0x27, 0x1C, 0, 4, 0, 0, 0, 0];
+        bytes.extend(0u64.to_le_bytes());
+        bytes.extend((header.len() as u64).to_le_bytes());
+        bytes.extend([0u8; 4]);
+        bytes.extend(&header);
+        let bomb = tmp.path().join("bomb.7z");
+        std::fs::write(&bomb, &bytes).unwrap();
+        assert_eq!(encoded_header_unpack_size(&bomb).unwrap(), 1 << 30);
+        assert!(matches!(check_header_size(&bomb), Err(Error::SevenZ(_))));
+        assert!(crate::list(&bomb, None).is_err());
+
+        // 加密檔名的 7z 也使用 encoded header，大小應正常
+        let src = tmp.path().join("a.txt");
+        std::fs::write(&src, "x").unwrap();
+        let ar = tmp.path().join("he.7z");
+        let opts = CompressOptions { password: Some("pw".into()), encrypt_names: true, ..Default::default() };
+        crate::compress(&[src], &ar, crate::Format::SevenZ, &opts, &crate::NoProgress).unwrap();
+        let n = encoded_header_unpack_size(&ar).unwrap();
+        assert!(n > 0 && n < 4096, "{n}");
+        assert_eq!(crate::list(&ar, Some("pw")).unwrap().len(), 1);
+    }
 
     /// 惡意壓縮檔的極端時間不可讓程式當掉
     #[test]
