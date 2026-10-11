@@ -200,6 +200,7 @@ pub(crate) struct Planner<'a> {
     limit: Option<u64>,
     written: Cell<u64>,
     /// 壓縮檔的「網路下載」標記（Mark-of-the-Web），會一併加到解出的檔案上
+    #[cfg_attr(not(windows), allow(dead_code))]
     motw: Option<Vec<u8>>,
 }
 

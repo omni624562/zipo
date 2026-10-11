@@ -4,6 +4,8 @@
 //! 也不會更改壓縮檔的預設開啟程式；隨時可以從「工具」選單移除。
 //! 預設程式則另外註冊（`register_default`），最後由使用者在 Windows 設定中選取。
 
+#![cfg_attr(not(windows), allow(dead_code))]
+
 use std::path::Path;
 
 /// 實際使用的位置；測試時改用其他機碼，不影響真實設定。

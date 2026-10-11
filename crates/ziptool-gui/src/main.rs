@@ -1929,6 +1929,12 @@ fn child_name(cur: &Location, prev: &Location) -> Option<String> {
     }
 }
 
+/// 測試用：程式內部的路徑一律是實際路徑（例如 macOS 的 /var 實際上是 /private/var），比對時也要用實際路徑
+#[cfg(test)]
+fn real_path(p: &Path) -> PathBuf {
+    strip_verbatim(std::fs::canonicalize(p).unwrap())
+}
+
 /// Windows 的 canonicalize 會加上 `\\?\` 前綴，顯示時去掉。
 fn strip_verbatim(p: PathBuf) -> PathBuf {
     let s = p.to_string_lossy();
@@ -2429,9 +2435,10 @@ mod phase3_tests {
     #[test]
     fn settings_are_remembered() {
         let t = tree();
+        let root = real_path(t.path());
         let mut store = MemStorage::default();
         {
-            let mut app = App::new(Some(t.path().join("sub")));
+            let mut app = App::new(Some(root.join("sub")));
             app.sort_key = SortKey::Size;
             app.sort_asc = false;
             app.add_format = Format::Zip;
@@ -2439,7 +2446,7 @@ mod phase3_tests {
             app.save_settings(&mut store);
         }
         let app = App::with_storage(None, Some(&store));
-        assert_eq!(app.loc, Location::Dir(t.path().join("sub")));
+        assert_eq!(app.loc, Location::Dir(root.join("sub")));
         assert_eq!((app.sort_key, app.sort_asc), (SortKey::Size, false));
         assert_eq!((app.add_format, app.add_level), (Format::Zip, 5));
 
@@ -2523,11 +2530,12 @@ mod update_tests {
     #[test]
     fn delete_and_add_inside_archive() {
         let t = tempfile::tempdir().unwrap();
-        let src = t.path().join("proj");
+        let root = real_path(t.path());
+        let src = root.join("proj");
         std::fs::create_dir_all(src.join("docs")).unwrap();
         std::fs::write(src.join("docs/a.txt"), "a").unwrap();
         std::fs::write(src.join("docs/b.txt"), "b").unwrap();
-        let ar = t.path().join("p.zip");
+        let ar = root.join("p.zip");
         ziptool_core::compress(&[src], &ar, Format::Zip, &Default::default(), &ziptool_core::NoProgress).unwrap();
 
         let ctx = egui::Context::default();
@@ -2551,7 +2559,7 @@ mod update_tests {
         assert_eq!(names(&app), ["b.txt"]);
 
         // 加入檔案：放進目前所在的資料夾
-        let extra = t.path().join("new.txt");
+        let extra = root.join("new.txt");
         std::fs::write(&extra, "n").unwrap();
         app.confirm_add_into_archive(vec![extra]);
         run_confirmed(&mut app, &ctx);
@@ -2640,19 +2648,20 @@ mod junction_tests {
     #[test]
     fn junction_is_listed_as_folder() {
         let t = tempfile::tempdir().unwrap();
-        std::fs::create_dir(t.path().join("real")).unwrap();
-        std::fs::write(t.path().join("real/inside.txt"), "x").unwrap();
-        junction(&t.path().join("link"), &t.path().join("real"));
+        let root = real_path(t.path());
+        std::fs::create_dir(root.join("real")).unwrap();
+        std::fs::write(root.join("real/inside.txt"), "x").unwrap();
+        junction(&root.join("link"), &root.join("real"));
 
-        let rows = browser::list_dir(t.path(), false).unwrap();
+        let rows = browser::list_dir(&root, false).unwrap();
         let link = rows.iter().find(|r| r.name == "link").unwrap();
         assert!(link.is_dir, "接合點應視為資料夾");
         assert!(!link.is_archive);
 
-        let mut app = App::new(Some(t.path().to_path_buf()));
+        let mut app = App::new(Some(root.clone()));
         let i = app.rows.iter().position(|r| r.name == "link").unwrap();
         app.open_row(i);
-        assert_eq!(app.loc, Location::Dir(t.path().join("link")));
+        assert_eq!(app.loc, Location::Dir(root.join("link")));
         assert_eq!(app.rows.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["inside.txt"]);
     }
 
@@ -2660,15 +2669,16 @@ mod junction_tests {
     #[test]
     fn inaccessible_folder_shows_chinese_error() {
         let t = tempfile::tempdir().unwrap();
-        std::fs::create_dir(t.path().join("gone")).unwrap();
-        junction(&t.path().join("broken"), &t.path().join("gone"));
-        std::fs::remove_dir(t.path().join("gone")).unwrap(); // 接合點指向不存在的位置
+        let root = real_path(t.path());
+        std::fs::create_dir(root.join("gone")).unwrap();
+        junction(&root.join("broken"), &root.join("gone"));
+        std::fs::remove_dir(root.join("gone")).unwrap(); // 接合點指向不存在的位置
 
-        let mut app = App::new(Some(t.path().to_path_buf()));
+        let mut app = App::new(Some(root.clone()));
         let i = app.rows.iter().position(|r| r.name == "broken").unwrap();
         assert!(app.rows[i].is_dir);
         app.open_row(i);
-        assert_eq!(app.loc, Location::Dir(t.path().to_path_buf()), "進不去時停留在原處");
+        assert_eq!(app.loc, Location::Dir(root.clone()), "進不去時停留在原處");
         let err = app.status_error.clone().unwrap_or_default();
         assert!(err.contains("無法開啟") && !err.contains("os error"), "{err}");
     }
@@ -2755,10 +2765,11 @@ mod crumb_tests {
     #[test]
     fn breadcrumbs_for_locations() {
         let t = tempfile::tempdir().unwrap();
-        let mut app = App::new(Some(t.path().to_path_buf()));
+        let root = real_path(t.path());
+        let mut app = App::new(Some(root.clone()));
         let crumbs = app.breadcrumbs();
         assert_eq!(crumbs[0], ("本機".to_string(), Location::Computer));
-        assert_eq!(crumbs.last().unwrap().1, Location::Dir(t.path().to_path_buf()));
+        assert_eq!(crumbs.last().unwrap().1, Location::Dir(root.clone()));
         // 每一段都指向它自己的位置，路徑逐層變長
         for w in crumbs.windows(2).skip(1) {
             if let (Location::Dir(a), Location::Dir(b)) = (&w[0].1, &w[1].1) {
