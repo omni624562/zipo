@@ -81,6 +81,7 @@ impl Row {
     }
 }
 
+#[cfg_attr(not(windows), allow(clippy::vec_init_then_push))]
 pub fn list_drives() -> Vec<Row> {
     let mut rows = Vec::new();
     #[cfg(windows)]

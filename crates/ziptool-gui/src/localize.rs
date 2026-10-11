@@ -123,7 +123,7 @@ fn expand_env(s: &str) -> String {
 /// 解析 desktop.ini 的內容（可能是 UTF-16 或 ANSI），取出 [.ShellClassInfo] 的 LocalizedResourceName。
 fn localized_resource_name(ini: &[u8]) -> Option<String> {
     let text = if ini.starts_with(&[0xFF, 0xFE]) {
-        let units: Vec<u16> = ini[2..].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        let units: Vec<u16> = ini[2..].as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
         String::from_utf16_lossy(&units)
     } else {
         String::from_utf8_lossy(ini.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(ini)).into_owned()
@@ -257,6 +257,7 @@ fn known_folder_name(_dir: &Path) -> Option<String> {
 }
 
 /// 磁碟機的顯示名稱，例如「OS (C:)」「本機磁碟 (D:)」。
+#[cfg_attr(not(windows), allow(clippy::unnecessary_literal_unwrap))]
 pub fn drive_display_name(root: &Path) -> String {
     let letter = root.display().to_string().trim_end_matches(['\\', '/']).to_string();
     #[cfg(windows)]
