@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = ["crates/ziptool-core", "crates/ziptool-cli", "crates/ziptool-gui"]
+
+[profile.release]
+lto = true
+codegen-units = 1
+
+# 測試時第三方壓縮函式庫也要夠快（debug 版的 deflate／LZMA 非常慢）
+[profile.dev.package."*"]
+opt-level = 2
