@@ -819,3 +819,44 @@ fn long_paths_work() {
         assert_eq!(fs::read_to_string(out.join(rel).join("深層檔案.txt")).unwrap(), "deep", "{f:?}");
     }
 }
+
+/// tar 中的中文檔名要寫在 PAX 擴充標頭（規格上一律是 UTF-8）。只寫在 GNU 標頭時，
+/// Windows 內建的 tar.exe 與檔案總管（libarchive）會用系統字碼頁解讀，讀不出檔名。
+#[test]
+fn tar_non_ascii_names_use_pax_headers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("中文資料夾");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("中文檔名.txt"), "內容").unwrap();
+    let en = tmp.path().join("en");
+    fs::create_dir_all(&en).unwrap();
+    fs::write(en.join("plain.txt"), "ascii").unwrap();
+    let ar = tmp.path().join("t.tar");
+    compress(&[src.clone(), en], &ar, Format::Tar, &CompressOptions::default(), &NoProgress).unwrap();
+
+    // 每個中文名稱都有對應的 PAX path 記錄
+    let raw = fs::read(&ar).unwrap();
+    let has = |rec: &str| raw.windows(rec.len()).any(|w| w == rec.as_bytes());
+    assert!(has(" path=中文資料夾/中文檔名.txt\n"), "缺少檔案的 PAX path 記錄");
+    assert!(has(" path=中文資料夾"), "缺少資料夾的 PAX path 記錄");
+    // 純英文檔名不需要額外的標頭
+    assert!(!has(" path=en"));
+
+    // 自己解得開
+    let out = tmp.path().join("out");
+    x(&ar, &out, None).unwrap();
+    assert_eq!(fs::read_to_string(out.join("中文資料夾/中文檔名.txt")).unwrap(), "內容");
+
+    // Windows 內建的 tar.exe 也解得開
+    #[cfg(windows)]
+    {
+        let bsdtar = Path::new(&std::env::var("SystemRoot").unwrap()).join(r"System32\tar.exe");
+        if bsdtar.is_file() {
+            let out2 = tmp.path().join("bsdtar");
+            fs::create_dir(&out2).unwrap();
+            let st = std::process::Command::new(&bsdtar).arg("-xf").arg(&ar).arg("-C").arg(&out2).output().unwrap();
+            assert!(st.status.success(), "tar.exe 失敗：{}", String::from_utf8_lossy(&st.stderr));
+            assert_eq!(fs::read_to_string(out2.join("中文資料夾/中文檔名.txt")).unwrap(), "內容");
+        }
+    }
+}

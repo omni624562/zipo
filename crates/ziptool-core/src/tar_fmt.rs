@@ -36,6 +36,11 @@ fn write_tar<W: Write>(w: W, items: &[Item], progress: &dyn Progress) -> Result<
     builder.follow_symlinks(false);
     for item in items {
         progress.entry(&item.name);
+        // 非 ASCII 檔名另外寫入 PAX 擴充標頭（規格上一律是 UTF-8）。只寫在 GNU 標頭時，
+        // Windows 內建的 tar 與檔案總管（libarchive）會用系統字碼頁解讀，讀不出中文檔名。
+        if !item.name.is_ascii() {
+            builder.append_pax_extensions([("path", item.name.as_bytes())])?;
+        }
         if item.is_dir {
             builder.append_dir(&item.name, &item.path)?;
         } else {
