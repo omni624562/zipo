@@ -328,9 +328,45 @@ fn run(task: Task, s: &Shared) -> Result<Outcome, Error> {
             if let Some(i) = r.issues.first() {
                 return Err(Error::Unsupported(format!("無法開啟 {}：{}", i.name, i.reason)));
             }
-            let rel = if strip.is_empty() { entry.as_str() } else { entry.strip_prefix(&format!("{strip}/")).unwrap_or(&entry) };
-            crate::open_path(&dir.join(rel));
+            let file = extracted_file(&dir).ok_or_else(|| Error::Unsupported(format!("無法開啟 {entry}")))?;
+            crate::open_path(&file);
             Ok(Outcome { title: String::new(), message: String::new(), open_dir: None, refresh: false, issues: Vec::new() })
         }
+    }
+}
+
+/// 開啟壓縮檔內的檔案時，暫存資料夾是新建的且只解出那一個檔案：直接找出它實際的位置。
+/// 不可用項目名稱組路徑：名稱在解壓時會被清理（例如 `C:x` → `C_x`），
+/// 而 `dir.join("C:x")` 會丟掉 `dir`，變成指向資料夾之外的另一個檔案。
+fn extracted_file(dir: &Path) -> Option<PathBuf> {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).ok()?.flatten() {
+            let t = e.file_type().ok()?;
+            if t.is_dir() {
+                stack.push(e.path());
+            } else if t.is_file() {
+                return Some(e.path());
+            }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod open_inside_tests {
+    use super::*;
+
+    #[test]
+    fn opens_the_file_actually_extracted() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(extracted_file(tmp.path()), None);
+        // 例如項目「docs/C:evil.html」解壓後成為 docs/C_evil.html
+        std::fs::create_dir_all(tmp.path().join("docs")).unwrap();
+        std::fs::write(tmp.path().join("docs/C_evil.html"), "x").unwrap();
+        let f = extracted_file(tmp.path()).unwrap();
+        assert_eq!(f, tmp.path().join("docs").join("C_evil.html"));
+        // 舊的寫法：以項目名稱組路徑會跳出暫存資料夾
+        assert!(!tmp.path().join("C:evil.html").starts_with(tmp.path()));
     }
 }

@@ -1878,9 +1878,11 @@ fn dialog_buttons_single(ui: &mut egui::Ui) -> (bool, bool) {
 
 /// 會直接執行程式碼的檔案類型；從壓縮檔中開啟前要先確認。
 fn is_executable(name: &str) -> bool {
-    const EXT: [&str; 22] = [
-        "exe", "com", "bat", "cmd", "ps1", "psm1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "msi", "msp", "scr", "lnk", "hta",
-        "cpl", "reg", "jar", "pif", "msc",
+    const EXT: [&str; 55] = [
+        "exe", "com", "bat", "cmd", "ps1", "psm1", "psd1", "ps1xml", "psc1", "vbs", "vbe", "vb", "js", "jse", "wsf", "wsh", "ws",
+        "wsc", "sct", "msi", "msp", "mst", "scr", "lnk", "hta", "cpl", "reg", "jar", "pif", "msc", "chm", "url", "website", "scf",
+        "inf", "xll", "gadget", "diagcab", "mht", "mhtml", "library-ms", "search-ms", "searchconnector-ms", "settingcontent-ms",
+        "appinstaller", "msix", "msixbundle", "appx", "appxbundle", "application", "appref-ms", "iso", "img", "vhd", "vhdx",
     ];
     name.rsplit_once('.').is_some_and(|(_, e)| EXT.contains(&e.to_ascii_lowercase().as_str()))
 }
@@ -2492,7 +2494,7 @@ mod phase3_tests {
 
     #[test]
     fn executables_need_confirmation() {
-        for n in ["setup.exe", "RUN.BAT", "a.ps1", "x.lnk", "m.msi"] {
+        for n in ["setup.exe", "RUN.BAT", "a.ps1", "x.lnk", "m.msi", "help.chm", "site.URL", "a.pdf.exe", "s.settingcontent-ms", "d.iso", "x.appinstaller"] {
             assert!(is_executable(n), "{n}");
         }
         for n in ["readme.txt", "photo.jpg", "exe", "doc.pdf"] {
