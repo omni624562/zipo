@@ -860,3 +860,53 @@ fn tar_non_ascii_names_use_pax_headers() {
         }
     }
 }
+
+/// 更新 tar／7z 時會先解到暫存資料夾：Windows 無法原樣保存的名稱（只差大小寫、含 `:`）
+/// 不可在重新壓縮後默默消失。要嘛拒絕更新（Windows），要嘛全部保留。
+#[test]
+fn update_never_silently_drops_entries() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ar = tmp.path().join("case.tar");
+    {
+        let mut b = tar::Builder::new(fs::File::create(&ar).unwrap());
+        for name in ["A.txt", "a.txt", "x:y", "ok.txt"] {
+            // 直接寫入檔名欄位（tar 函式庫在 Windows 上不接受含 `:` 的名稱）
+            let mut h = tar::Header::new_gnu();
+            h.as_old_mut().name[..name.len()].copy_from_slice(name.as_bytes());
+            h.set_size(name.len() as u64);
+            h.set_mode(0o644);
+            h.set_cksum();
+            b.append(&h, name.as_bytes()).unwrap();
+        }
+        b.finish().unwrap();
+    }
+    let new = tmp.path().join("new.txt");
+    fs::write(&new, "new").unwrap();
+    let res = update(&ar, &[new], "", &[], &CompressOptions::default(), &NoProgress);
+    let names: Vec<String> = list(&ar, None).unwrap().into_iter().map(|e| e.name).collect();
+    for n in ["A.txt", "a.txt", "x:y", "ok.txt"] {
+        assert!(names.contains(&n.to_string()), "{n} 遺失：{names:?}（結果 {res:?}）");
+    }
+    #[cfg(windows)]
+    assert!(matches!(res, Err(Error::Unsupported(_))), "{res:?}");
+}
+
+/// 更新後，壓縮檔「從網際網路下載」的標記（Mark-of-the-Web）要保留
+#[cfg(windows)]
+#[test]
+fn update_keeps_mark_of_the_web() {
+    for f in [Format::Zip, Format::Tar, Format::SevenZ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = make_tree(tmp.path());
+        let ar = tmp.path().join(format!("m.{}", f.extension()));
+        compress(&[src], &ar, f, &CompressOptions::default(), &NoProgress).unwrap();
+        let mut ads = ar.as_os_str().to_os_string();
+        ads.push(":Zone.Identifier");
+        let zone = "[ZoneTransfer]\r\nZoneId=3\r\nHostUrl=https://example.com/m\r\n";
+        fs::write(&ads, zone).unwrap();
+        let new = tmp.path().join("new.txt");
+        fs::write(&new, "new").unwrap();
+        update(&ar, &[new], "", &[], &CompressOptions::default(), &NoProgress).unwrap();
+        assert_eq!(fs::read_to_string(&ads).ok().as_deref(), Some(zone), "{f:?}");
+    }
+}

@@ -212,6 +212,8 @@ pub fn update(
     };
 
     let part = util::part_path(archive);
+    // 取代檔案會遺失「從網際網路下載」的標記；之後解出的檔案就不會被 Windows 警告，所以要寫回
+    let zone = util::zone_identifier(archive);
     let res = (|| -> Result<()> {
         if format == Format::Zip {
             progress.start(util::total_size(&items));
@@ -229,6 +231,18 @@ pub fn update(
                 return Err(Error::Unsupported(format!("無法完整讀出原有項目 {}：{}", i.name, i.reason)));
             }
             let mut all = util::collect_tree(&tmp, drop)?;
+            // 原有項目必須全部原樣讀出。Windows 上無法保存的名稱（只差大小寫、含 `:` 等字元、CON 等保留名稱）
+            // 會被改名或互相覆蓋，重新壓縮後就會遺失，因此拒絕更新。
+            let kept: std::collections::HashSet<&str> = all.iter().map(|i| i.name.as_str()).collect();
+            if let Some(lost) = list(archive, opts.password.as_deref())?
+                .iter()
+                .map(|e| util::normalize_name(&e.name))
+                .find(|n| !n.is_empty() && !drop(n) && !kept.contains(n.as_str()))
+            {
+                return Err(Error::Unsupported(format!(
+                    "壓縮檔中的「{lost}」無法在這台電腦上原樣保存（例如名稱只差大小寫、含有不允許的字元或是保留名稱），為避免遺失資料，無法加入或刪除項目"
+                )));
+            }
             all.extend(items.iter().map(|i| util::Item { path: i.path.clone(), name: i.name.clone(), ..*i }));
             let mut o = opts.clone();
             // 原本加密了檔名的 7z，更新後也維持加密檔名
@@ -244,7 +258,12 @@ pub fn update(
         let _ = std::fs::remove_dir_all(&tmp);
         r
     })()
-    .and_then(|()| Ok(std::fs::rename(&part, archive)?));
+    .and_then(|()| {
+        if let Some(z) = &zone {
+            util::set_zone_identifier(&part, z)?;
+        }
+        Ok(std::fs::rename(&part, archive)?)
+    });
     if res.is_err() {
         let _ = std::fs::remove_file(&part);
     }

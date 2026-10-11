@@ -407,6 +407,31 @@ impl<'a> Planner<'a> {
     fn mark_of_the_web(&self, _target: &Path) {}
 }
 
+/// 檔案的 Zone.Identifier（Mark-of-the-Web）原始內容；用於更新壓縮檔後原樣寫回。
+#[cfg(windows)]
+pub(crate) fn zone_identifier(path: &Path) -> Option<Vec<u8>> {
+    let mut ads = path.as_os_str().to_os_string();
+    ads.push(":Zone.Identifier");
+    std::fs::read(ads).ok()
+}
+
+#[cfg(windows)]
+pub(crate) fn set_zone_identifier(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    let mut ads = path.as_os_str().to_os_string();
+    ads.push(":Zone.Identifier");
+    std::fs::write(ads, data)
+}
+
+#[cfg(not(windows))]
+pub(crate) fn zone_identifier(_path: &Path) -> Option<Vec<u8>> {
+    None
+}
+
+#[cfg(not(windows))]
+pub(crate) fn set_zone_identifier(_path: &Path, _data: &[u8]) -> std::io::Result<()> {
+    Ok(())
+}
+
 /// 讀取壓縮檔的 Zone.Identifier；只有來自網際網路（3）或受限制網站（4）時才傳遞。
 #[cfg(windows)]
 fn read_motw(archive: &Path) -> Option<Vec<u8>> {
