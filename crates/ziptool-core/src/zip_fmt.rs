@@ -153,7 +153,7 @@ fn for_each(
     for i in 0..zip.len() {
         let raw = zip.by_index_raw(i)?;
         if select(&entry_name(&raw)) {
-            total += raw.size();
+            total = raw.size().saturating_add(total);
         }
     }
     progress.start(total);

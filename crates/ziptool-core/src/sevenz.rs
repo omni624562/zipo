@@ -283,7 +283,7 @@ fn for_each(
     let mut reader = ArchiveReader::new(BufReader::new(File::open(archive)?), password(pw)).map_err(map_err)?;
     // 解碼時每個執行緒最多需要一個字典（最大 64 MB）加上緩衝區
     reader.set_thread_count(crate::util::threads_for(160 << 20));
-    progress.start(reader.archive().files.iter().filter(|f| select(f.name())).map(|f| f.size()).sum());
+    progress.start(reader.archive().files.iter().filter(|f| select(f.name())).map(|f| f.size()).fold(0u64, u64::saturating_add));
 
     let mut own_err = None;
     let res = reader.for_each_entries(|entry, r| {

@@ -303,7 +303,7 @@ fn preflight(archive: &Path, format: Format, dest: &Path, opts: &ExtractOptions,
         Err(_) => return Ok(()), // 清單讀不到（例如加密檔名）時交給解壓本身處理錯誤
     };
     let plan = util::Planner::new(archive, dest, opts, &NoProgress, None);
-    let need: u64 = entries.iter().filter(|e| !e.is_dir && plan.selected(&e.name)).filter_map(|e| e.size).sum();
+    let need: u64 = entries.iter().filter(|e| !e.is_dir && plan.selected(&e.name)).filter_map(|e| e.size).fold(0u64, u64::saturating_add);
     check_size(need, std::fs::metadata(archive)?.len(), available, opts.allow_high_ratio)
 }
 

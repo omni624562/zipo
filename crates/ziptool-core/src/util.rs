@@ -199,6 +199,10 @@ pub(crate) struct Planner<'a> {
     /// 最多可寫入的位元組數（目的磁碟的可用空間），防止串流型壓縮炸彈塞爆磁碟
     limit: Option<u64>,
     written: Cell<u64>,
+    /// 壓縮檔大小與「大量」的門檻：實際寫出超過門檻且達壓縮檔的 [`crate::BOMB_RATIO`] 倍時視為壓縮炸彈。
+    /// 宣告的大小可以造假，tar／gz 等格式也沒有清單可預先檢查，所以解壓時要即時判斷。
+    packed: u64,
+    bomb_min: u64,
     /// 壓縮檔的「網路下載」標記（Mark-of-the-Web），會一併加到解出的檔案上
     #[cfg_attr(not(windows), allow(dead_code))]
     motw: Option<Vec<u8>>,
@@ -217,6 +221,8 @@ impl<'a> Planner<'a> {
             report: RefCell::default(),
             limit,
             written: Cell::new(0),
+            packed: std::fs::metadata(archive).map(|m| m.len()).unwrap_or(0),
+            bomb_min: crate::BOMB_MIN_SIZE,
             motw: read_motw(archive),
         }
     }
@@ -353,6 +359,11 @@ impl<'a> Planner<'a> {
                 drop(file);
                 let _ = std::fs::remove_file(&part);
                 return Err(Error::NotEnoughSpace { need: total, available: limit });
+            }
+            if !self.opts.allow_high_ratio && total >= self.bomb_min && total / self.packed.max(1) >= crate::BOMB_RATIO {
+                drop(file);
+                let _ = std::fs::remove_file(&part);
+                return Err(Error::PossibleBomb { size: total, packed: self.packed });
             }
             self.written.set(total);
             size += n as u64;
@@ -620,6 +631,31 @@ mod tests {
         let r = plan.write_file("big.bin", &tmp.path().join("big.bin"), &mut data, None, None);
         assert!(matches!(r, Err(Error::NotEnoughSpace { .. })), "{r:?}");
         assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0, "不應留下任何檔案");
+    }
+
+    /// 宣告的大小可以造假，tar／gz 等格式也沒有清單可預先檢查：解壓時要依實際寫出的量即時判斷壓縮炸彈
+    #[test]
+    fn live_ratio_check_stops_bombs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ar = tmp.path().join("small.gz");
+        std::fs::write(&ar, [0u8; 100]).unwrap();
+        let out = tmp.path().join("out");
+        std::fs::create_dir(&out).unwrap();
+        let opts = ExtractOptions::default();
+        let mut plan = Planner::new(&ar, &out, &opts, &NoProgress, None);
+        plan.bomb_min = 1 << 20; // 測試用：1 MB 就視為大量（實際為 1 GB）
+        let mut zeros = io::repeat(0).take(10 << 20);
+        let r = plan.write_file("big.bin", &out.join("big.bin"), &mut zeros, None, None);
+        assert!(matches!(r, Err(Error::PossibleBomb { packed: 100, .. })), "{r:?}");
+        assert_eq!(std::fs::read_dir(&out).unwrap().count(), 0, "不應留下任何檔案");
+
+        // 使用者確認要繼續時不中斷
+        let allow = ExtractOptions { allow_high_ratio: true, ..Default::default() };
+        let mut plan = Planner::new(&ar, &out, &allow, &NoProgress, None);
+        plan.bomb_min = 1 << 20;
+        let mut zeros = io::repeat(0).take(10 << 20);
+        plan.write_file("big.bin", &out.join("big.bin"), &mut zeros, None, None).unwrap();
+        assert_eq!(std::fs::metadata(out.join("big.bin")).unwrap().len(), 10 << 20);
     }
 
     #[test]
