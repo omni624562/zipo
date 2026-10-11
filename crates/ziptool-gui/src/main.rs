@@ -193,8 +193,30 @@ fn format_duration(d: Duration) -> String {
 
 /// 用系統預設程式開啟檔案或資料夾。
 pub fn open_path(path: &Path) {
+    // 直接呼叫 ShellExecuteW，不經過 explorer.exe 的命令列：explorer 會把逗號當成參數分隔，
+    // 例如「a,b.txt」會開成「文件」資料夾而不是這個檔案。在背景執行緒呼叫，避免部分程式卡住畫面。
     #[cfg(target_os = "windows")]
-    let _ = std::process::Command::new("explorer").arg(path).spawn();
+    {
+        use std::os::windows::ffi::OsStrExt;
+        #[link(name = "shell32")]
+        unsafe extern "system" {
+            fn ShellExecuteW(
+                hwnd: *mut std::ffi::c_void,
+                op: *const u16,
+                file: *const u16,
+                params: *const u16,
+                dir: *const u16,
+                show: i32,
+            ) -> *mut std::ffi::c_void;
+        }
+        let file: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        std::thread::spawn(move || {
+            let op: Vec<u16> = "open\0".encode_utf16().collect();
+            const SW_SHOWNORMAL: i32 = 1;
+            // SAFETY: 兩個字串都以 0 結尾且在呼叫期間有效
+            unsafe { ShellExecuteW(std::ptr::null_mut(), op.as_ptr(), file.as_ptr(), std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL) };
+        });
+    }
     #[cfg(target_os = "macos")]
     let _ = std::process::Command::new("open").arg(path).spawn();
     #[cfg(all(unix, not(target_os = "macos")))]
