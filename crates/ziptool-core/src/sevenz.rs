@@ -23,7 +23,19 @@ fn password(pw: Option<&str>) -> Password {
 }
 
 fn mtime(e: &ArchiveEntry) -> Option<SystemTime> {
-    e.has_last_modified_date.then(|| e.last_modified_date().into())
+    e.has_last_modified_date.then(|| nt_time(e.last_modified_date().into())).flatten()
+}
+
+/// Windows 檔案時間（自 1601 年起的 100 奈秒數）轉為 SystemTime。
+/// 函式庫內建的轉換沒有檢查溢位，惡意壓縮檔的極端時間會讓程式當掉；超出範圍時視為未知。
+fn nt_time(ticks: u64) -> Option<SystemTime> {
+    const TO_UNIX_SECS: u64 = 11_644_473_600;
+    let (secs, nanos) = (ticks / 10_000_000, (ticks % 10_000_000) as u32 * 100);
+    if secs >= TO_UNIX_SECS {
+        SystemTime::UNIX_EPOCH.checked_add(std::time::Duration::new(secs - TO_UNIX_SECS, nanos))
+    } else {
+        SystemTime::UNIX_EPOCH.checked_sub(std::time::Duration::new(TO_UNIX_SECS - secs, 0))?.checked_add(std::time::Duration::new(0, nanos))
+    }
 }
 
 /// 各壓縮等級的 LZMA2 字典大小（與 xz／7-Zip 的預設值相同）。
@@ -210,6 +222,16 @@ pub(crate) fn list(archive: &Path, pw: Option<&str>) -> Result<Vec<Entry>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 惡意壓縮檔的極端時間不可讓程式當掉
+    #[test]
+    fn nt_time_never_panics() {
+        assert_eq!(nt_time(116_444_736_000_000_000), Some(SystemTime::UNIX_EPOCH));
+        assert_eq!(nt_time(116_444_736_000_000_000 + 15), SystemTime::UNIX_EPOCH.checked_add(std::time::Duration::from_nanos(1500)));
+        for t in [0, 1, u64::MAX - 5, u64::MAX] {
+            let _ = nt_time(t);
+        }
+    }
 
     /// 加密的金鑰延伸次數要與 7-Zip 相同（2^19 次 SHA-256），否則密碼容易被暴力破解
     #[test]
