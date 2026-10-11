@@ -127,12 +127,15 @@ pub fn list_dir(dir: &Path, show_system: bool) -> std::io::Result<Vec<Row>> {
         if !show_system && is_protected_system(&link_meta) {
             continue;
         }
-        // 符號連結與目錄接合點：依指向的目標判斷；目標讀不到時，看連結本身是否帶有「目錄」屬性
-        let target = link_meta.file_type().is_symlink().then(|| std::fs::metadata(e.path()).ok()).flatten();
+        // 符號連結與目錄接合點：依指向的目標判斷；目標讀不到時，看連結本身是否帶有「目錄」屬性。
+        // 指向網路位置的連結不跟隨：光是列出資料夾就連線，會把登入憑證（NTLM 雜湊）送到對方伺服器。
+        let is_link = link_meta.file_type().is_symlink();
+        let remote = is_link && std::fs::read_link(e.path()).is_ok_and(|t| is_remote_path(&t));
+        let target = (is_link && !remote).then(|| std::fs::metadata(e.path()).ok()).flatten();
         let meta = target.as_ref().unwrap_or(&link_meta);
         let is_dir = meta.is_dir() || (target.is_none() && has_directory_attr(&link_meta));
         let name = e.file_name().to_string_lossy().into_owned();
-        let display = if is_dir {
+        let display = if is_dir && !remote {
             crate::localize::folder_display_name(&e.path(), attribute_bits(&link_meta)).unwrap_or_else(|| name.clone())
         } else {
             name.clone()
@@ -150,6 +153,12 @@ pub fn list_dir(dir: &Path, show_system: bool) -> std::io::Result<Vec<Row>> {
         });
     }
     Ok(rows)
+}
+
+/// 網路路徑（`\\伺服器\共用`、`\\?\UNC\…`）
+fn is_remote_path(p: &Path) -> bool {
+    use std::path::{Component, Prefix};
+    matches!(p.components().next(), Some(Component::Prefix(x)) if matches!(x.kind(), Prefix::UNC(..) | Prefix::VerbatimUNC(..)))
 }
 
 #[cfg(windows)]
@@ -294,6 +303,16 @@ mod tests {
         let root = archive_rows(&entries, "");
         let names: Vec<_> = root.iter().map(|r| (r.name.as_str(), r.is_dir, r.size)).collect();
         assert_eq!(names, [("lnk", true, Some(5)), ("ok.txt", false, Some(2))]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn remote_link_targets() {
+        assert!(is_remote_path(Path::new(r"\\192.0.2.1\share")));
+        assert!(is_remote_path(Path::new(r"\\?\UNC\192.0.2.1\share\x")));
+        assert!(!is_remote_path(Path::new(r"C:\Users")));
+        assert!(!is_remote_path(Path::new(r"\\?\C:\Users")));
+        assert!(!is_remote_path(Path::new(r"..\sibling")));
     }
 
     #[test]

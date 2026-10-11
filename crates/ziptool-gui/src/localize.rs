@@ -168,6 +168,27 @@ fn ui_language_mui(module: &Path) -> Option<std::path::PathBuf> {
     Some(real_system_path(&module.parent()?.join(UI_LANGUAGE).join(format!("{}.mui", module.file_name()?.to_string_lossy()))))
 }
 
+/// 資源參照中的模組路徑只接受 Windows 資料夾（`%SystemRoot%`）內的檔案。
+/// desktop.ini 可能來自不受信任的位置（USB、網路磁碟、ISO、解壓縮出來的資料夾）：
+/// 若指向 `\\伺服器\…`，光是瀏覽資料夾就會讓 Windows 自動連線並送出登入憑證（NTLM 雜湊），
+/// 其他環境變數（例如 `%USERNAME%`）也可能被拿來洩漏資訊，所以一律拒絕。
+fn system_module(file: &str) -> Option<std::path::PathBuf> {
+    let root = std::env::var("SystemRoot").ok()?;
+    let file = file.trim();
+    let lower = file.to_lowercase();
+    let path = ["%systemroot%", "%windir%"]
+        .iter()
+        .find(|v| lower.starts_with(*v))
+        .map(|v| format!("{root}{}", &file[v.len()..]))
+        .unwrap_or_else(|| file.to_string());
+    let prefix = format!("{}\\", root.trim_end_matches('\\').to_lowercase());
+    let ok = path.to_lowercase().starts_with(&prefix)
+        && !path.contains('%')
+        && !path.contains('/')
+        && !Path::new(&path).components().any(|c| matches!(c, std::path::Component::ParentDir));
+    ok.then(|| std::path::PathBuf::from(path))
+}
+
 /// 把資源參照（`@檔案路徑,-編號`）轉成文字；先找繁體中文的 .mui 檔，再找系統語言。
 #[cfg(windows)]
 fn resolve_resource(reference: &str) -> Option<String> {
@@ -177,7 +198,7 @@ fn resolve_resource(reference: &str) -> Option<String> {
     let result = (|| {
         let (file, id) = reference.strip_prefix('@')?.rsplit_once(',')?;
         let id: u32 = id.trim().trim_start_matches('-').parse().ok()?;
-        let module = std::path::PathBuf::from(expand_env(file.trim()));
+        let module = system_module(file)?;
         let mui = ui_language_mui(&module)?;
         win::load_string(&mui, id).or_else(|| win::load_string(&real_system_path(&module), id))
     })();
@@ -302,6 +323,35 @@ mod tests {
         }
         assert_eq!(expand_env("%不存在的變數%\\x"), "%不存在的變數%\\x");
         assert_eq!(expand_env("no vars"), "no vars");
+    }
+
+    /// desktop.ini 的資源參照只能指向 Windows 資料夾；網路路徑、其他環境變數與 .. 一律拒絕
+    #[cfg(windows)]
+    #[test]
+    fn resource_modules_must_be_in_windows_folder() {
+        let root = std::env::var("SystemRoot").unwrap();
+        let ok = system_module(r"%SystemRoot%\system32\shell32.dll").unwrap();
+        assert_eq!(ok, Path::new(&root).join(r"system32\shell32.dll"));
+        assert!(system_module(r"%windir%\system32\shell32.dll").is_some());
+        assert!(system_module(&format!(r"{root}\system32\shell32.dll")).is_some());
+        for bad in [
+            r"\\192.0.2.1\share\x.dll",
+            r"\\?\UNC\192.0.2.1\share\x.dll",
+            r"//192.0.2.1/share/x.dll",
+            r"\\%USERNAME%.example.invalid\s\x.dll",
+            r"%SystemRoot%\..\Users\x.dll",
+            r"%SystemRoot%\system32\%USERNAME%.dll",
+            r"%SystemRoot%/../x.dll",
+            r"C:\Users\Public\x.dll",
+            r"%SystemRoot%Evil\x.dll",
+            r"shell32.dll",
+        ] {
+            assert_eq!(system_module(bad), None, "{bad}");
+        }
+        // 指向無法連線的伺服器：不可嘗試連線，必須立即回傳
+        let t = std::time::Instant::now();
+        assert_eq!(resolve_resource(r"@\\192.0.2.1\share\x.dll,-1"), None);
+        assert!(t.elapsed() < std::time::Duration::from_secs(1), "{:?}", t.elapsed());
     }
 
     #[cfg(windows)]
