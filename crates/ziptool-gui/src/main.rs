@@ -2404,6 +2404,11 @@ fn strip_verbatim(p: PathBuf) -> PathBuf {
 
 impl eframe::App for App {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        // 截圖用的執行（只在開發版）不寫入使用者的設定，避免改掉上次的資料夾等
+        #[cfg(debug_assertions)]
+        if self.devshot.is_some() {
+            return;
+        }
         self.save_settings(storage);
     }
 
