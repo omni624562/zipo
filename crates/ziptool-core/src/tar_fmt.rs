@@ -1,3 +1,4 @@
+use crate::L;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::Path;
@@ -91,7 +92,7 @@ pub(crate) fn extract(archive: &Path, plan: &Planner, format: Format, progress: 
         } else if plan.selected(&name) {
             // 與 7-Zip 預設相同：不建立符號連結、硬連結與裝置檔。
             // 連結可能指向目標資料夾之外，後續項目再經由它寫入就會逃出資料夾。
-            plan.issue(&name, "符號連結或特殊檔案，基於安全考量不建立");
+            plan.issue(&name, L!("符號連結或特殊檔案，基於安全考量不建立", "Symbolic link or special file; not created for security reasons"));
         }
     }
     Ok(())

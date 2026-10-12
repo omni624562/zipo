@@ -2,6 +2,7 @@
 //!
 //! 壓縮檔內的檔案可能是惡意的，圖片解碼時限制尺寸與記憶體，文字只讀開頭的一段。
 
+use ziptool_core::{F, L};
 use std::io::Read;
 use std::path::Path;
 
@@ -52,8 +53,8 @@ pub enum Content {
 pub fn load(path: &Path) -> Content {
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     match kind(&name) {
-        Some(Kind::Image) => load_image(path).unwrap_or_else(|e| Content::Unavailable(format!("無法顯示圖片：{e}"))),
-        Some(Kind::Text) => load_text(path).unwrap_or_else(|e| Content::Unavailable(format!("無法讀取：{e}"))),
+        Some(Kind::Image) => load_image(path).unwrap_or_else(|e| Content::Unavailable(F!("無法顯示圖片：{e}", "Cannot show the image: {e}"))),
+        Some(Kind::Text) => load_text(path).unwrap_or_else(|e| Content::Unavailable(F!("無法讀取：{e}", "Cannot read: {e}"))),
         None => Content::Unavailable(String::new()),
     }
 }
@@ -82,7 +83,7 @@ fn load_text(path: &Path) -> Result<Content, String> {
     bytes.truncate(TEXT_LIMIT);
     Ok(match decode_text(&bytes) {
         Some(text) => Content::Text { text, truncated },
-        None => Content::Unavailable("看起來不是文字檔".into()),
+        None => Content::Unavailable(L!("看起來不是文字檔", "This doesn't look like a text file").into()),
     })
 }
 

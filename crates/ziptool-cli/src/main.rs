@@ -2,6 +2,7 @@
 //!
 //!   zipo <指令> [<參數>...] <壓縮檔> [<檔案名稱>...]
 
+use ziptool_core::{F, L};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -10,7 +11,7 @@ use std::time::{Instant, SystemTime};
 use indicatif::{ProgressBar, ProgressStyle};
 use ziptool_core::{CompressOptions, Error, ExtractOptions, Format, Overwrite, OverwriteAnswer, Progress, format_size};
 
-const HELP: &str = "\
+const HELP_ZH: &str = "\
 用法：zipo <指令> [<參數>...] <壓縮檔> [<檔案名稱>...]
 
 <指令>
@@ -49,6 +50,51 @@ const HELP: &str = "\
   zipo l backup.7z
   zipo t backup.7z -p密碼
 ";
+
+const HELP_EN: &str = "\
+Usage: zipo <command> [<switches>...] <archive> [<file names>...]
+
+<Commands>
+  a : Add files to archive (adds or replaces items when the archive exists)
+  d : Delete items from archive
+  e : Extract files without folder structure
+  h : Calculate file hashes (CRC32, MD5, SHA-1, SHA-256); for folders, every file inside
+  l : List contents
+  t : Test integrity
+  u : Update archive (same as a)
+  x : Extract files with full paths
+  i : Show supported formats
+
+<Switches>
+  --       : Treat all following arguments as file names (recommended with wildcards
+             such as *, so a file named like -p123 is not taken as a switch)
+  -ao{a|s|u} : Existing files: a overwrite all, s skip, u auto rename (ask if not set)
+  -bd      : Hide the progress bar
+  -m{param} : Compression parameters: -mx{0-9} (or -mx={0-9}), -mhe={on|off},
+             -mcp={codepage} (file name encoding of old zips, e.g. 950 = Big5, 936 = GBK;
+             system default if not set)
+  -o{folder} : Output folder
+  -p{password} : Set the password; -p alone asks for it interactively (recommended:
+             passwords on the command line are visible to other programs and kept in history)
+  -r       : Recurse subfolders (the default; may be omitted)
+  -v{size} : Split into volumes, e.g. -v100m, -v4g (creates name.001, name.002…);
+             extract by giving name.001
+  -t{format} : Archive format: 7z, zip, tar, tar.gz, tar.bz2, tar.xz, tar.zst, gzip, bzip2, xz, zstd
+  -y       : Answer yes to all questions (non-interactive)
+
+Examples
+  zipo a backup.7z Documents Photos -mx9 -p -mhe=on
+  zipo x backup.7z -oD:\\Restore -aou
+  zipo e logs.tar.zst -oflat logs/app.log logs/err.log
+  zipo a backup.7z new-file.txt
+  zipo d backup.7z Documents/old
+  zipo l backup.7z
+  zipo t backup.7z -pPassword
+";
+
+fn help() -> &'static str {
+    ziptool_core::i18n::pick(HELP_ZH, HELP_EN)
+}
 
 /// 7-Zip 的結束代碼
 mod exit {
@@ -105,7 +151,7 @@ fn parse_format(s: &str) -> Option<Format> {
 fn parse(argv: Vec<String>) -> Result<Args, String> {
     let mut a = Args::default();
     let mut it = argv.into_iter();
-    let cmd = it.next().ok_or("缺少指令")?;
+    let cmd = it.next().ok_or(L!("缺少指令", "Missing command"))?;
     a.cmd = Some(match cmd.to_ascii_lowercase().as_str() {
         "a" | "u" => Cmd::Add,
         "d" => Cmd::Delete,
@@ -115,7 +161,7 @@ fn parse(argv: Vec<String>) -> Result<Args, String> {
         "t" => Cmd::Test,
         "i" => Cmd::Info,
         "h" => Cmd::Hash,
-        other => return Err(format!("不支援的指令：{other}")),
+        other => return Err(F!("不支援的指令：{other}", "Unsupported command: {other}")),
     });
     let mut only_files = false;
     for arg in it {
@@ -141,26 +187,26 @@ fn parse(argv: Vec<String>) -> Result<Args, String> {
             "mhe=off" | "mhe-" => a.encrypt_names = false,
             _ if lower.starts_with("mcp") => {
                 let v = lower[3..].trim_start_matches('=');
-                a.codepage = Some(v.parse().map_err(|_| format!("無效的字碼頁：{arg}"))?);
+                a.codepage = Some(v.parse().map_err(|_| F!("無效的字碼頁：{arg}", "Invalid code page: {arg}"))?);
             }
             _ if lower.starts_with("mx") => {
                 let v = lower[2..].trim_start_matches('=');
-                let lv: u32 = v.parse().map_err(|_| format!("無效的壓縮等級：{arg}"))?;
+                let lv: u32 = v.parse().map_err(|_| F!("無效的壓縮等級：{arg}", "Invalid compression level: {arg}"))?;
                 if lv > 9 {
-                    return Err(format!("壓縮等級須為 0–9：{arg}"));
+                    return Err(F!("壓縮等級須為 0–9：{arg}", "Compression level must be 0–9: {arg}"));
                 }
                 a.level = Some(lv);
             }
             _ if lower.starts_with('v') => {
-                a.volume = Some(ziptool_core::parse_volume_size(&sw[1..]).ok_or_else(|| format!("無效的分割大小：{arg}"))?);
+                a.volume = Some(ziptool_core::parse_volume_size(&sw[1..]).ok_or_else(|| F!("無效的分割大小：{arg}", "Invalid volume size: {arg}"))?);
             }
             // 保留大小寫：路徑與密碼
             _ if lower.starts_with('o') => a.out = Some(PathBuf::from(&sw[1..])),
             _ if lower.starts_with('p') => a.password = Some(sw[1..].to_string()),
             _ if lower.starts_with('t') => {
-                a.format = Some(parse_format(&sw[1..]).ok_or_else(|| format!("不支援的格式：{}", &sw[1..]))?)
+                a.format = Some(parse_format(&sw[1..]).ok_or_else(|| F!("不支援的格式：{}", "Unsupported format: {}", &sw[1..]))?)
             }
-            _ => return Err(format!("不支援的參數：{arg}")),
+            _ => return Err(F!("不支援的參數：{arg}", "Unsupported switch: {arg}")),
         }
     }
     Ok(a)
@@ -197,9 +243,9 @@ impl Progress for Bar {
         self.0.suspend(|| {
             loop {
                 eprint!(
-                    "\n檔案已存在：{}\n要取代嗎？(Y)是 / (N)否 / (A)全部是 / (S)全部略過 / (U)全部自動改名 / (Q)中止：",
+                    "{}", F!("\n檔案已存在：{}\n要取代嗎？(Y)是 / (N)否 / (A)全部是 / (S)全部略過 / (U)全部自動改名 / (Q)中止：", "\nFile already exists: {}\nReplace it? (Y)es / (N)o / (A)lways / (S)kip all / a(U)to rename all / (Q)uit: ",
                     clean(&path.display().to_string())
-                );
+                ));
                 let mut line = String::new();
                 if matches!(std::io::stdin().read_line(&mut line), Ok(0) | Err(_)) {
                     return OverwriteAnswer::NoAll;
@@ -224,7 +270,7 @@ struct Warnings(usize);
 
 impl std::fmt::Display for Warnings {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "有 {} 個項目被略過", self.0)
+        write!(f, "{}", F!("有 {} 個項目被略過", "{} item(s) were skipped", self.0))
     }
 }
 
@@ -247,7 +293,7 @@ fn clean_lines(s: &str) -> String {
 }
 
 fn confirm(question: &str) -> bool {
-    eprint!("{question} (y/N)：");
+    eprint!("{}", F!("{question} (y/N)：", "{question} (y/N): "));
     let mut line = String::new();
     std::io::stdin().read_line(&mut line).is_ok() && line.trim().eq_ignore_ascii_case("y")
 }
@@ -255,13 +301,13 @@ fn confirm(question: &str) -> bool {
 // ---------- 共用 ----------
 
 fn prompt_password(confirm: bool) -> anyhow::Result<String> {
-    let pw = rpassword::prompt_password("輸入密碼：")?;
+    let pw = rpassword::prompt_password(L!("輸入密碼：", "Enter password: "))?;
     // 建立加密壓縮檔時不接受空白密碼（等於沒有加密）
     if confirm && pw.is_empty() {
-        anyhow::bail!("密碼不可空白");
+        anyhow::bail!("{}", F!("密碼不可空白", "The password cannot be empty"));
     }
-    if confirm && rpassword::prompt_password("再次輸入密碼：")? != pw {
-        anyhow::bail!("兩次輸入的密碼不一致");
+    if confirm && rpassword::prompt_password(L!("再次輸入密碼：", "Re-enter password: "))? != pw {
+        anyhow::bail!("{}", F!("兩次輸入的密碼不一致", "The passwords do not match"));
     }
     Ok(pw)
 }
@@ -305,7 +351,7 @@ fn format_time(t: Option<SystemTime>) -> String {
 }
 
 fn archive_path(a: &Args) -> anyhow::Result<&Path> {
-    a.archive.as_deref().ok_or_else(|| anyhow::anyhow!("缺少壓縮檔名稱"))
+    a.archive.as_deref().ok_or_else(|| anyhow::anyhow!("{}", F!("缺少壓縮檔名稱", "Missing archive name")))
 }
 
 // ---------- 指令 ----------
@@ -341,14 +387,14 @@ fn cmd_add(a: &Args) -> anyhow::Result<()> {
 
     let bar = Bar::new(a.no_progress);
     if archive.exists() && a.volume.is_some() {
-        anyhow::bail!("壓縮檔已存在，無法以分割方式更新：{}", archive.display());
+        anyhow::bail!("{}", F!("壓縮檔已存在，無法以分割方式更新：{}", "The archive already exists and cannot be updated as split volumes: {}", archive.display()));
     }
     if archive.exists() {
         // 與 7-Zip 相同：壓縮檔已存在時加入（同名項目取代），原檔在全部完成後才被替換
-        println!("正在更新壓縮檔：{}", archive.display());
+        println!("{}", F!("正在更新壓縮檔：{}", "Updating archive: {}", archive.display()));
         ziptool_core::update(&archive, &inputs, "", &[], &opts, &bar)?;
     } else {
-        println!("正在建立壓縮檔：{}（{}）", archive.display(), format.name());
+        println!("{}", F!("正在建立壓縮檔：{}（{}）", "Creating archive: {} ({})", archive.display(), format.name()));
         ziptool_core::compress(&inputs, &archive, format, &opts, &bar)?;
     }
     bar.0.finish_and_clear();
@@ -356,43 +402,43 @@ fn cmd_add(a: &Args) -> anyhow::Result<()> {
         // 分割後原檔已不存在，列出各個分割檔
         let parts: Vec<PathBuf> = (1..).map(|n| PathBuf::from(format!("{}.{n:03}", archive.display()))).take_while(|p| p.is_file()).collect();
         let total: u64 = parts.iter().filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum();
-        println!("已分割為 {} 個檔案（{}）：{} …\n一切正常", parts.len(), format_size(total), parts[0].display());
+        println!("{}", F!("已分割為 {} 個檔案（{}）：{} …\n一切正常", "Split into {} files ({}): {} …\nEverything is OK", parts.len(), format_size(total), parts[0].display()));
         return Ok(());
     }
     let size = std::fs::metadata(&archive)?.len();
-    println!("壓縮檔大小：{}\n一切正常", format_size(size));
+    println!("{}", F!("壓縮檔大小：{}\n一切正常", "Archive size: {}\nEverything is OK", format_size(size)));
     Ok(())
 }
 
 fn cmd_delete(a: &Args) -> anyhow::Result<()> {
     let archive = archive_path(a)?;
     if a.files.is_empty() {
-        anyhow::bail!("請指定要刪除的項目（壓縮檔內的完整路徑）");
+        anyhow::bail!("{}", F!("請指定要刪除的項目（壓縮檔內的完整路徑）", "Specify the items to delete (full paths inside the archive)"));
     }
     let names = ziptool_core::list(archive, a.password.as_deref().filter(|p| !p.is_empty()))?;
     for f in &a.files {
         let f = f.trim_matches('/');
         if !names.iter().any(|e| e.name == f || e.name.starts_with(&format!("{f}/"))) {
-            anyhow::bail!("壓縮檔中沒有：{f}");
+            anyhow::bail!("{}", F!("壓縮檔中沒有：{f}", "Not in the archive: {f}"));
         }
     }
     let password = match &a.password {
         Some(p) if p.is_empty() => Some(prompt_password(false)?),
         other => other.clone(),
     };
-    println!("正在從 {} 刪除 {} 個項目", archive.display(), a.files.len());
+    println!("{}", F!("正在從 {} 刪除 {} 個項目", "Deleting {1} item(s) from {0}", archive.display(), a.files.len()));
     let bar = Bar::new(a.no_progress);
     let opts = CompressOptions { level: a.level, password, encrypt_names: false, volume_size: None };
     ziptool_core::update(archive, &[], "", &a.files, &opts, &bar)?;
     bar.0.finish_and_clear();
-    println!("一切正常");
+    println!("{}", F!("一切正常", "Everything is OK"));
     Ok(())
 }
 
 fn cmd_extract(a: &Args, flatten: bool) -> anyhow::Result<()> {
     let archive = archive_path(a)?;
     let dest = a.out.clone().unwrap_or_else(|| PathBuf::from("."));
-    println!("正在解壓縮：{}", archive.display());
+    println!("{}", F!("正在解壓縮：{}", "Extracting: {}", archive.display()));
     let started = Instant::now();
     let overwrite = a.overwrite.unwrap_or(if a.yes { Overwrite::Overwrite } else { Overwrite::Ask });
     // -y 代表使用者已同意所有詢問，包含高壓縮比的警告
@@ -413,8 +459,8 @@ fn cmd_extract(a: &Args, flatten: bool) -> anyhow::Result<()> {
         bar.0.finish_and_clear();
         match r {
             Err(e) if !allow_high_ratio && interactive(a) && matches!(e.downcast_ref::<Error>(), Some(Error::PossibleBomb { .. })) => {
-                eprintln!("警告：{e}");
-                if !confirm("確定要繼續解壓縮嗎？") {
+                eprintln!("{}", F!("警告：{e}", "Warning: {e}"));
+                if !confirm(L!("確定要繼續解壓縮嗎？", "Continue extracting?")) {
                     return Err(e);
                 }
                 allow_high_ratio = true;
@@ -423,29 +469,29 @@ fn cmd_extract(a: &Args, flatten: bool) -> anyhow::Result<()> {
         }
     };
     for i in &report.issues {
-        eprintln!("警告：{}：{}", clean(&i.name), clean_lines(&i.reason));
+        eprintln!("{}", F!("警告：{}：{}", "Warning: {}: {}", clean(&i.name), clean_lines(&i.reason)));
     }
     println!(
-        "已解壓縮到：{}（{} 個檔案，{}，{:.1} 秒）",
+        "{}", F!("已解壓縮到：{}（{} 個檔案，{}，{:.1} 秒）", "Extracted to: {} ({} files, {}, {:.1} s)",
         dest.display(),
         report.files,
         format_size(report.bytes),
         started.elapsed().as_secs_f32()
-    );
+    ));
     if !report.issues.is_empty() {
         return Err(Warnings(report.issues.len()).into());
     }
-    println!("一切正常");
+    println!("{}", F!("一切正常", "Everything is OK"));
     Ok(())
 }
 
 fn cmd_test(a: &Args) -> anyhow::Result<()> {
     let archive = archive_path(a)?;
-    println!("正在測試：{}", archive.display());
+    println!("{}", F!("正在測試：{}", "Testing: {}", archive.display()));
     let bar = Bar::new(a.no_progress);
     let report = with_password(a, |pw| ziptool_core::test(archive, pw, &bar))?;
     bar.0.finish_and_clear();
-    println!("檔案：{}\n大小：{}\n一切正常", report.files, format_size(report.bytes));
+    println!("{}", F!("檔案：{}\n大小：{}\n一切正常", "Files: {}\nSize: {}\nEverything is OK", report.files, format_size(report.bytes)));
     Ok(())
 }
 
@@ -453,19 +499,19 @@ fn cmd_test(a: &Args) -> anyhow::Result<()> {
 fn cmd_hash(a: &Args) -> anyhow::Result<()> {
     let inputs: Vec<PathBuf> = a.archive.iter().cloned().chain(a.files.iter().map(PathBuf::from)).collect();
     if inputs.is_empty() {
-        anyhow::bail!("缺少檔案名稱");
+        anyhow::bail!("{}", F!("缺少檔案名稱", "Missing file name"));
     }
     let bar = Bar::new(a.no_progress);
     let results = ziptool_core::hash_files(&inputs, &bar)?;
     bar.0.finish_and_clear();
     for (name, h) in &results {
-        println!("{}（{}）", clean(name), format_size(h.size));
+        println!("{}", F!("{}（{}）", "{} ({})", clean(name), format_size(h.size)));
         for (algo, value) in h.all() {
             println!("  {algo:<8}{value}");
         }
         println!();
     }
-    println!("{} 個檔案", results.len());
+    println!("{}", F!("{} 個檔案", "{} file(s)", results.len()));
     Ok(())
 }
 
@@ -473,10 +519,10 @@ fn cmd_list(a: &Args) -> anyhow::Result<()> {
     let archive = archive_path(a)?;
     let entries = with_password(a, |pw| ziptool_core::list(archive, pw))?;
     let format = Format::detect(archive)?;
-    println!("壓縮檔：{}\n格式：{}\n", archive.display(), format.name());
+    println!("{}", F!("壓縮檔：{}\n格式：{}\n", "Archive: {}\nFormat: {}\n", archive.display(), format.name()));
 
     let rule = "------------------- ----- ------------ ------------  ------------------------";
-    println!("       日期時間       屬性         大小     壓縮後大小  名稱");
+    println!("{}", F!("       日期時間       屬性         大小     壓縮後大小  名稱", "   Date      Time    Attr         Size   Compressed  Name"));
     println!("{rule}");
     let (mut files, mut dirs, mut size, mut packed) = (0u64, 0u64, 0u64, 0u64);
     let mut any_encrypted = false;
@@ -502,15 +548,15 @@ fn cmd_list(a: &Args) -> anyhow::Result<()> {
     }
     println!("{rule}");
     let packed = if entries.iter().any(|e| e.compressed_size.is_some()) { packed.to_string() } else { String::new() };
-    println!("{:19} {:5} {size:>12} {packed:>12}  {files} 個檔案，{dirs} 個資料夾", "", "");
+    println!("{}", F!("{:19} {:5} {size:>12} {packed:>12}  {files} 個檔案，{dirs} 個資料夾", "{:19} {:5} {size:>12} {packed:>12}  {files} files, {dirs} folders", "", ""));
     if any_encrypted {
-        println!("\n* 表示已加密");
+        println!("{}", F!("\n* 表示已加密", "\n* encrypted"));
     }
     Ok(())
 }
 
 fn cmd_info() {
-    println!("格式        副檔名                     壓縮  解壓縮  密碼");
+    println!("{}", F!("格式        副檔名                     壓縮  解壓縮  密碼", "Format      Extensions                 Pack  Unpack  Password"));
     for f in Format::ALL {
         let exts = match f {
             Format::TarGz => "tar.gz tgz",
@@ -521,23 +567,29 @@ fn cmd_info() {
             other => other.extension(),
         };
         let pw = if f.supports_password() { "AES-256" } else { "" };
-        println!("{:<11} {:<26} 是    是      {pw}", f.name(), exts);
+        println!("{}", F!("{:<11} {:<26} 是    是      {pw}", "{:<11} {:<26} yes   yes     {pw}", f.name(), exts));
     }
-    println!("{:<11} {:<26} 否    是      （ISO 9660、Joliet；不支援只用 UDF 的映像檔）", "iso", "iso");
+    println!("{}", F!("{:<11} {:<26} 否    是      （ISO 9660、Joliet；不支援只用 UDF 的映像檔）", "{:<11} {:<26} no    yes     (ISO 9660, Joliet; UDF-only images are not supported)", "iso", "iso"));
 }
 
 fn main() -> ExitCode {
-    println!("Zipo {} ：以 7-Zip 為藍本的壓縮工具\n", env!("CARGO_PKG_VERSION"));
+    let english = match std::env::var("ZIPO_LANG").as_deref() {
+        Ok("zh") => false,
+        Ok("en") => true,
+        _ => ziptool_core::i18n::system_prefers_english(),
+    };
+    ziptool_core::i18n::set_english(english);
+    println!("{}", F!("Zipo {} ：以 7-Zip 為藍本的壓縮工具\n", "Zipo {} : an archiver modeled on 7-Zip\n", env!("CARGO_PKG_VERSION")));
     let argv: Vec<String> = std::env::args().skip(1).collect();
     // 只寫 h 時顯示說明；h 後面接檔案時是計算雜湊值（與 7z 相同）
     if argv.is_empty() || matches!(argv[0].as_str(), "-h" | "--help" | "/?") || argv == ["h"] {
-        print!("{HELP}");
+        print!("{}", help());
         return ExitCode::from(exit::OK);
     }
     let args = match parse(argv) {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("命令列錯誤：{e}\n\n{HELP}");
+            eprintln!("{}", F!("命令列錯誤：{e}\n\n{}", "Command line error: {e}\n\n{}", help()));
             return ExitCode::from(exit::USAGE);
         }
     };
@@ -562,7 +614,7 @@ fn main() -> ExitCode {
             ExitCode::from(exit::WARNING)
         }
         Err(e) => {
-            eprintln!("錯誤：{}", clean_lines(&format!("{e:#}")));
+            eprintln!("{}", F!("錯誤：{}", "Error: {}", clean_lines(&format!("{e:#}"))));
             ExitCode::from(exit::FATAL)
         }
     }

@@ -8,6 +8,8 @@ use std::process::{Command, Output, Stdio};
 /// 執行 ziptool；`stdin` 會被送進標準輸入（模擬使用者回答）。
 fn run(dir: &Path, args: &[&str], stdin: &str) -> Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_zipo"))
+        // 測試比對中文訊息；CI 的系統語言是英文
+        .env("ZIPO_LANG", "zh")
         .args(args)
         .current_dir(dir)
         .stdin(Stdio::piped())

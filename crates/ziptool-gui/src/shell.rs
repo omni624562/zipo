@@ -6,6 +6,7 @@
 
 #![cfg_attr(not(windows), allow(dead_code))]
 
+use ziptool_core::L;
 use std::path::Path;
 
 /// 實際使用的位置；測試時改用其他機碼，不影響真實設定。
@@ -18,14 +19,14 @@ pub const ARCHIVE_EXTS: [&str; 11] = [".zip", ".7z", ".tar", ".gz", ".tgz", ".bz
 fn verbs(exe: &Path) -> Vec<(String, &'static str, String)> {
     let exe = exe.display();
     let mut v = vec![
-        (r"*\shell\ZipTool.Add".to_string(), "加入壓縮檔（Zipo）…", format!("\"{exe}\" --add \"%1\"")),
-        (r"Directory\shell\ZipTool.Add".to_string(), "加入壓縮檔（Zipo）…", format!("\"{exe}\" --add \"%1\"")),
+        (r"*\shell\ZipTool.Add".to_string(), L!("加入壓縮檔（Zipo）…", "Add to archive (Zipo)…"), format!("\"{exe}\" --add \"%1\"")),
+        (r"Directory\shell\ZipTool.Add".to_string(), L!("加入壓縮檔（Zipo）…", "Add to archive (Zipo)…"), format!("\"{exe}\" --add \"%1\"")),
     ];
     for ext in ARCHIVE_EXTS {
         let base = format!(r"SystemFileAssociations\{ext}\shell");
-        v.push((format!(r"{base}\ZipTool.Open"), "用 Zipo 開啟", format!("\"{exe}\" \"%1\"")));
-        v.push((format!(r"{base}\ZipTool.ExtractHere"), "解壓縮到這裡（Zipo）", format!("\"{exe}\" --extract-here \"%1\"")));
-        v.push((format!(r"{base}\ZipTool.ExtractFolder"), "解壓縮到資料夾（Zipo）…", format!("\"{exe}\" --extract-folder \"%1\"")));
+        v.push((format!(r"{base}\ZipTool.Open"), L!("用 Zipo 開啟", "Open with Zipo"), format!("\"{exe}\" \"%1\"")));
+        v.push((format!(r"{base}\ZipTool.ExtractHere"), L!("解壓縮到這裡（Zipo）", "Extract here (Zipo)"), format!("\"{exe}\" --extract-here \"%1\"")));
+        v.push((format!(r"{base}\ZipTool.ExtractFolder"), L!("解壓縮到資料夾（Zipo）…", "Extract to folder (Zipo)…"), format!("\"{exe}\" --extract-folder \"%1\"")));
     }
     v
 }
@@ -83,14 +84,14 @@ pub fn register_default(base: &str, exe: &Path) -> std::io::Result<()> {
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let exe = exe.display();
     let (prog, _) = hkcu.create_subkey(format!(r"{base}\Classes\{PROG_ID}"))?;
-    prog.set_value("", &"Zipo 壓縮檔")?;
+    prog.set_value("", &L!("Zipo 壓縮檔", "Zipo archive"))?;
     // 索引 1：壓縮檔圖示（見 assets/ziptool.rc）
     prog.create_subkey("DefaultIcon")?.0.set_value("", &format!("\"{exe}\",1"))?;
     prog.create_subkey(r"shell\open\command")?.0.set_value("", &format!("\"{exe}\" \"%1\""))?;
 
     let (caps, _) = hkcu.create_subkey(format!(r"{base}\{APP_NAME}\Capabilities"))?;
     caps.set_value("ApplicationName", &DISPLAY_NAME)?;
-    caps.set_value("ApplicationDescription", &"壓縮與解壓縮 ZIP、7z、TAR 等格式")?;
+    caps.set_value("ApplicationDescription", &L!("壓縮與解壓縮 ZIP、7z、TAR 等格式", "Compress and extract ZIP, 7z, TAR and more"))?;
     let (assoc, _) = caps.create_subkey("FileAssociations")?;
     for ext in ARCHIVE_EXTS {
         assoc.set_value(ext, &PROG_ID)?;
@@ -161,7 +162,7 @@ fn notify_assoc_changed() {
 
 #[cfg(not(windows))]
 pub fn register_default(_base: &str, _exe: &Path) -> std::io::Result<()> {
-    Err(std::io::Error::other("只支援 Windows"))
+    Err(std::io::Error::other(L!("只支援 Windows", "Only supported on Windows")))
 }
 
 #[cfg(not(windows))]
@@ -179,7 +180,7 @@ pub fn open_default_apps_settings() {}
 
 #[cfg(not(windows))]
 pub fn install(_root: &str, _exe: &Path) -> std::io::Result<()> {
-    Err(std::io::Error::other("只支援 Windows"))
+    Err(std::io::Error::other(L!("只支援 Windows", "Only supported on Windows")))
 }
 
 #[cfg(not(windows))]

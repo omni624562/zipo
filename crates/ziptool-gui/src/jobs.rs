@@ -1,5 +1,6 @@
 //! 背景工作：壓縮、解壓縮、測試、開啟壓縮檔內的檔案。
 
+use ziptool_core::{F, L};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -43,13 +44,13 @@ pub enum Task {
 impl Task {
     pub fn title(&self) -> &'static str {
         match self {
-            Task::Compress { .. } => "正在壓縮",
-            Task::Extract { .. } => "正在解壓縮",
-            Task::Test { .. } => "正在測試",
-            Task::OpenInside { .. } | Task::OpenNested { .. } => "正在開啟",
-            Task::PrepareDrag { .. } => "正在準備拖曳",
-            Task::Update { .. } => "正在更新壓縮檔",
-            Task::Hash { .. } | Task::HashInside { .. } => "正在計算雜湊值",
+            Task::Compress { .. } => L!("正在壓縮", "Compressing"),
+            Task::Extract { .. } => L!("正在解壓縮", "Extracting"),
+            Task::Test { .. } => L!("正在測試", "Testing"),
+            Task::OpenInside { .. } | Task::OpenNested { .. } => L!("正在開啟", "Opening"),
+            Task::PrepareDrag { .. } => L!("正在準備拖曳", "Preparing to drag"),
+            Task::Update { .. } => L!("正在更新壓縮檔", "Updating archive"),
+            Task::Hash { .. } | Task::HashInside { .. } => L!("正在計算雜湊值", "Calculating hashes"),
         }
     }
 
@@ -206,7 +207,7 @@ impl Job {
     }
 
     pub fn join(self) -> (Task, Result<Outcome, Error>) {
-        let r = self.handle.join().unwrap_or_else(|_| Err(Error::Unsupported("背景工作異常中止".into())));
+        let r = self.handle.join().unwrap_or_else(|_| Err(Error::Unsupported(L!("背景工作異常中止", "The background task stopped unexpectedly").into())));
         (self.task, r)
     }
 
@@ -262,7 +263,7 @@ pub fn smart_dest(ar: &Path, out: PathBuf, opts: &ExtractOptions) -> PathBuf {
 }
 
 fn stage(s: &Shared, i: usize, n: usize, ar: &Path) {
-    *lock(&s.stage) = if n > 1 { format!("第 {} / {n} 個：{}", i + 1, file_name(ar)) } else { file_name(ar) };
+    *lock(&s.stage) = if n > 1 { F!("第 {} / {n} 個：{}", "{} of {n}: {}", i + 1, file_name(ar)) } else { file_name(ar) };
 }
 
 fn run(task: Task, s: &Shared) -> Result<Outcome, Error> {
@@ -279,29 +280,29 @@ fn run(task: Task, s: &Shared) -> Result<Outcome, Error> {
             let size: u64 = parts.iter().filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum();
             let total: u64 = s.total.load(Ordering::Relaxed);
             let ratio = if total > 0 { size as f64 * 100.0 / total as f64 } else { 0.0 };
-            let mut message = format!(
-                "{}\n\n原始大小：{}\n壓縮後：{}（{ratio:.0}%）\n耗時：{:.1} 秒",
+            let mut message = F!(
+                "{}\n\n原始大小：{}\n壓縮後：{}（{ratio:.0}%）\n耗時：{:.1} 秒", "{}\n\nOriginal size: {}\nCompressed: {} ({ratio:.0}%)\nTime: {:.1} s",
                 parts.first().unwrap_or(&output).display(),
                 human(total),
                 human(size),
                 started.elapsed().as_secs_f32()
             );
             if parts.len() > 1 || opts.volume_size.is_some() {
-                message += &format!("\n分割為 {} 個檔案；解壓縮時開啟 .001 即可", parts.len());
+                message += &F!("\n分割為 {} 個檔案；解壓縮時開啟 .001 即可", "\nSplit into {} files; open the .001 file to extract", parts.len());
             }
             if then.recycle {
                 // 先確認壓縮檔完整，才移除原始檔
-                *lock(&s.stage) = "正在檢查壓縮檔".into();
+                *lock(&s.stage) = L!("正在檢查壓縮檔", "Testing the archive").into();
                 message += &match ziptool_core::test(parts.first().unwrap_or(&output), opts.password.as_deref(), &ziptool_core::NoProgress) {
                     Ok(_) => match send_to_recycle_bin(&inputs) {
-                        Ok(()) => "\n\n原始檔已移到資源回收筒。".to_string(),
-                        Err(e) => format!("\n\n原始檔無法移到資源回收筒：{e}"),
+                        Ok(()) => L!("\n\n原始檔已移到資源回收筒。", "\n\nThe original files were moved to the Recycle Bin.").to_string(),
+                        Err(e) => F!("\n\n原始檔無法移到資源回收筒：{e}", "\n\nThe original files could not be moved to the Recycle Bin: {e}"),
                     },
-                    Err(e) => format!("\n\n壓縮檔檢查失敗（{e}），原始檔保留不動。"),
+                    Err(e) => F!("\n\n壓縮檔檢查失敗（{e}），原始檔保留不動。", "\n\nThe archive test failed ({e}); the original files were kept."),
                 };
             }
             Ok(Outcome {
-                title: "壓縮完成".into(),
+                title: L!("壓縮完成", "Compression complete").into(),
                 message,
                 open_dir: output.parent().map(Path::to_path_buf),
                 refresh: true,
@@ -327,9 +328,9 @@ fn run(task: Task, s: &Shared) -> Result<Outcome, Error> {
                 bytes += r.bytes;
                 issues.extend(r.issues);
             }
-            let title = if issues.is_empty() { "解壓縮完成" } else { "解壓縮完成，但有項目被略過" };
-            let mut message = format!(
-                "已解壓縮到：\n{}\n\n檔案：{files} 個（{}）\n耗時：{:.1} 秒",
+            let title = if issues.is_empty() { L!("解壓縮完成", "Extraction complete") } else { L!("解壓縮完成，但有項目被略過", "Extraction complete, but some items were skipped") };
+            let mut message = F!(
+                "已解壓縮到：\n{}\n\n檔案：{files} 個（{}）\n耗時：{:.1} 秒", "Extracted to:\n{}\n\nFiles: {files} ({})\nTime: {:.1} s",
                 shown.display(),
                 human(bytes),
                 started.elapsed().as_secs_f32()
@@ -337,11 +338,11 @@ fn run(task: Task, s: &Shared) -> Result<Outcome, Error> {
             // 只解出部分項目或有項目被略過時，壓縮檔保留不動
             if then.recycle {
                 message += &if !issues.is_empty() || opts.selection.is_some() {
-                    "\n\n有項目未解出，壓縮檔保留不動。".to_string()
+                    L!("\n\n有項目未解出，壓縮檔保留不動。", "\n\nSome items were not extracted; the archive was kept.").to_string()
                 } else {
                     match send_to_recycle_bin(&archives) {
-                        Ok(()) => "\n\n壓縮檔已移到資源回收筒。".to_string(),
-                        Err(e) => format!("\n\n壓縮檔無法移到資源回收筒：{e}"),
+                        Ok(()) => L!("\n\n壓縮檔已移到資源回收筒。", "\n\nThe archive was moved to the Recycle Bin.").to_string(),
+                        Err(e) => F!("\n\n壓縮檔無法移到資源回收筒：{e}", "\n\nThe archive could not be moved to the Recycle Bin: {e}"),
                     }
                 };
             }
@@ -365,8 +366,8 @@ fn run(task: Task, s: &Shared) -> Result<Outcome, Error> {
                 bytes += r.bytes;
             }
             Ok(Outcome {
-                title: "測試完成".into(),
-                message: format!("沒有發現錯誤。\n\n壓縮檔：{n} 個\n檔案：{files} 個\n大小：{}", human(bytes)),
+                title: L!("測試完成", "Test complete").into(),
+                message: F!("沒有發現錯誤。\n\n壓縮檔：{n} 個\n檔案：{files} 個\n大小：{}", "No errors found.\n\nArchives: {n}\nFiles: {files}\nSize: {}", human(bytes)),
                 open_dir: None,
                 refresh: false,
                 issues: Vec::new(),
@@ -378,13 +379,13 @@ fn run(task: Task, s: &Shared) -> Result<Outcome, Error> {
             let opts = CompressOptions { password, ..Default::default() };
             ziptool_core::update(&archive, &add, &into, &remove, &opts, s)?;
             let what = match (add.len(), remove.len()) {
-                (a, 0) => format!("已加入 {a} 個項目"),
-                (0, r) => format!("已刪除 {r} 個項目"),
-                (a, r) => format!("已加入 {a} 個、刪除 {r} 個項目"),
+                (a, 0) => F!("已加入 {a} 個項目", "Added {a} item(s)"),
+                (0, r) => F!("已刪除 {r} 個項目", "Deleted {r} item(s)"),
+                (a, r) => F!("已加入 {a} 個、刪除 {r} 個項目", "Added {a} and deleted {r} item(s)"),
             };
             Ok(Outcome {
-                title: "已更新壓縮檔".into(),
-                message: format!("{}\n\n{what}\n耗時：{:.1} 秒", archive.display(), started.elapsed().as_secs_f32()),
+                title: L!("已更新壓縮檔", "Archive updated").into(),
+                message: F!("{}\n\n{what}\n耗時：{:.1} 秒", "{}\n\n{what}\nTime: {:.1} s", archive.display(), started.elapsed().as_secs_f32()),
                 open_dir: None,
                 refresh: true,
                 issues: Vec::new(),
@@ -399,7 +400,7 @@ fn run(task: Task, s: &Shared) -> Result<Outcome, Error> {
                 let opts = ExtractOptions { password, selection: Some(entries), strip_prefix: strip, ..Default::default() };
                 let r = ziptool_core::extract(&archive, &dir, &opts, s)?;
                 if let Some(i) = r.issues.first() {
-                    return Err(Error::Unsupported(format!("無法讀取 {}：{}", i.name, i.reason)));
+                    return Err(Error::Unsupported(F!("無法讀取 {}：{}", "Cannot read {}: {}", i.name, i.reason)));
                 }
                 let mut top: Vec<PathBuf> = std::fs::read_dir(&dir).map(|d| d.flatten().map(|e| e.path()).collect()).unwrap_or_default();
                 top.sort();
@@ -414,7 +415,7 @@ fn run(task: Task, s: &Shared) -> Result<Outcome, Error> {
             let opts = ExtractOptions { password, selection: Some(entries), strip_prefix: strip, ..Default::default() };
             let r = ziptool_core::extract(&archive, &dir, &opts, s);
             let r = r.and_then(|r| match r.issues.first() {
-                Some(i) => Err(Error::Unsupported(format!("無法拖曳 {}：{}", i.name, i.reason))),
+                Some(i) => Err(Error::Unsupported(F!("無法拖曳 {}：{}", "Cannot drag {}: {}", i.name, i.reason))),
                 None => Ok(()),
             });
             if let Err(e) = r {
@@ -423,8 +424,8 @@ fn run(task: Task, s: &Shared) -> Result<Outcome, Error> {
             }
             let prepared: Vec<PathBuf> = std::fs::read_dir(&dir).map(|d| d.flatten().map(|e| e.path()).collect()).unwrap_or_default();
             Ok(Outcome {
-                title: "已準備好拖曳".into(),
-                message: "項目已解壓縮完成。請再把它們拖曳到目的地一次，這次會立即開始。".into(),
+                title: L!("已準備好拖曳", "Ready to drag").into(),
+                message: L!("項目已解壓縮完成。請再把它們拖曳到目的地一次，這次會立即開始。", "The items have been extracted. Drag them to the destination once more; this time it starts immediately.").into(),
                 prepared,
                 ..Default::default()
             })
@@ -435,9 +436,9 @@ fn run(task: Task, s: &Shared) -> Result<Outcome, Error> {
             let opts = ExtractOptions { password, selection: Some(vec![entry.clone()]), strip_prefix: strip, ..Default::default() };
             let r = ziptool_core::extract(&archive, &dir, &opts, s)?;
             if let Some(i) = r.issues.first() {
-                return Err(Error::Unsupported(format!("無法開啟 {}：{}", i.name, i.reason)));
+                return Err(Error::Unsupported(F!("無法開啟 {}：{}", "Cannot open {}: {}", i.name, i.reason)));
             }
-            let file = extracted_file(&dir).ok_or_else(|| Error::Unsupported(format!("無法開啟 {entry}")))?;
+            let file = extracted_file(&dir).ok_or_else(|| Error::Unsupported(F!("無法開啟 {entry}", "Cannot open {entry}")))?;
             Ok(Outcome { opened: Some(file), ..Default::default() })
         }
         Task::OpenInside { archive, entry, strip, password } => {
@@ -446,9 +447,9 @@ fn run(task: Task, s: &Shared) -> Result<Outcome, Error> {
             let opts = ExtractOptions { password, selection: Some(vec![entry.clone()]), strip_prefix: strip.clone(), ..Default::default() };
             let r = ziptool_core::extract(&archive, &dir, &opts, s)?;
             if let Some(i) = r.issues.first() {
-                return Err(Error::Unsupported(format!("無法開啟 {}：{}", i.name, i.reason)));
+                return Err(Error::Unsupported(F!("無法開啟 {}：{}", "Cannot open {}: {}", i.name, i.reason)));
             }
-            let file = extracted_file(&dir).ok_or_else(|| Error::Unsupported(format!("無法開啟 {entry}")))?;
+            let file = extracted_file(&dir).ok_or_else(|| Error::Unsupported(F!("無法開啟 {entry}", "Cannot open {entry}")))?;
             crate::open_path(&file);
             Ok(Outcome { opened: Some(file), ..Default::default() })
         }
@@ -534,7 +535,7 @@ pub fn recycle(paths: &[PathBuf]) -> std::io::Result<()> {
     // SAFETY: 路徑清單在呼叫期間有效，結構依 Windows 的定義建立
     let r = unsafe { SHFileOperationW(&mut op) };
     if r != 0 || op.fAnyOperationsAborted.as_bool() {
-        return Err(std::io::Error::other(format!("錯誤代碼 {r:#x}")));
+        return Err(std::io::Error::other(F!("錯誤代碼 {r:#x}", "error code {r:#x}")));
     }
     Ok(())
 }
@@ -542,7 +543,7 @@ pub fn recycle(paths: &[PathBuf]) -> std::io::Result<()> {
 #[cfg(not(windows))]
 #[cfg_attr(test, allow(dead_code))]
 pub fn recycle(_paths: &[PathBuf]) -> std::io::Result<()> {
-    Err(std::io::Error::other("只支援 Windows"))
+    Err(std::io::Error::other(L!("只支援 Windows", "Only supported on Windows")))
 }
 
 #[cfg(test)]

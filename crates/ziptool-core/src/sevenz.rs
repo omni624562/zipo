@@ -1,3 +1,4 @@
+use crate::F;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::Path;
@@ -30,7 +31,7 @@ fn check_header_size(archive: &Path) -> Result<()> {
         Err(_) => return Ok(()),
     };
     if declared > MAX_HEADER_UNPACK {
-        return Err(Error::SevenZ(format!("目錄資料宣告為 {}，異常龐大，可能是惡意檔案", crate::format_size(declared))));
+        return Err(Error::SevenZ(F!("目錄資料宣告為 {}，異常龐大，可能是惡意檔案", "The archive header claims {}, which is abnormally large; the file may be malicious", crate::format_size(declared))));
     }
     Ok(())
 }

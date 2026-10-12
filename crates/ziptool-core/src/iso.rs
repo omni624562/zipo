@@ -3,6 +3,7 @@
 //! 只使用 UDF 的映像檔（例如 Windows 安裝光碟）目前無法讀取，會明確告知。
 //! 映像檔可能是惡意的：目錄互相指向形成迴圈、層數過深都會被擋下。
 
+use crate::{F, L};
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{self, BufReader, Read};
@@ -34,9 +35,9 @@ fn ioe(e: impl std::fmt::Display) -> io::Error {
 
 fn iso_err(e: &dyn std::fmt::Display, archive: &Path) -> Error {
     if is_udf_only(archive) {
-        Error::Unsupported("這個 ISO 只使用 UDF 格式（例如 Windows 安裝光碟），目前還無法讀取".into())
+        Error::Unsupported(L!("這個 ISO 只使用 UDF 格式（例如 Windows 安裝光碟），目前還無法讀取", "This ISO uses only the UDF format (for example, Windows installation media) and cannot be read yet").into())
     } else {
-        Error::Unsupported(format!("無法讀取 ISO：{e}"))
+        Error::Unsupported(F!("無法讀取 ISO：{e}", "Cannot read the ISO: {e}"))
     }
 }
 
@@ -71,7 +72,7 @@ fn entry_time(entry: &DirEntry) -> Option<SystemTime> {
 
 /// 依序走訪所有項目：`f(完整名稱, 項目)`
 fn walk(image: &Image, f: &mut dyn FnMut(&str, &DirEntry) -> Result<()>) -> Result<()> {
-    let root = image.root_dirs().try_best_choice().ok_or_else(|| Error::Unsupported("ISO 中沒有目錄".into()))?;
+    let root = image.root_dirs().try_best_choice().ok_or_else(|| Error::Unsupported(L!("ISO 中沒有目錄", "The ISO has no directory").into()))?;
     let joliet = matches!(root.entry_type(), EntryType::Joliet { .. });
     let mut seen = HashSet::new();
     walk_dir(image, image.open_dir(root.dir_ref()), "", joliet, 0, &mut seen, f)
@@ -87,7 +88,7 @@ fn walk_dir(
     f: &mut dyn FnMut(&str, &DirEntry) -> Result<()>,
 ) -> Result<()> {
     if depth > MAX_DEPTH {
-        return Err(Error::Unsupported("ISO 的目錄層數過深，可能是損壞或惡意的檔案".into()));
+        return Err(Error::Unsupported(L!("ISO 的目錄層數過深，可能是損壞或惡意的檔案", "The ISO directories are nested too deeply; the file may be damaged or malicious").into()));
     }
     let entries: Vec<DirEntry> = dir.entries().collect::<std::result::Result<_, _>>().map_err(ioe)?;
     for entry in entries {
@@ -151,7 +152,7 @@ pub(crate) fn list(archive: &Path) -> Result<Vec<Entry>> {
     })?;
     // 只有 UDF 的映像檔，ISO 9660 部分通常只放一個說明檔
     if out.len() <= 1 && is_udf_only(archive) {
-        return Err(Error::Unsupported("這個 ISO 只使用 UDF 格式（例如 Windows 安裝光碟），目前還無法讀取".into()));
+        return Err(Error::Unsupported(L!("這個 ISO 只使用 UDF 格式（例如 Windows 安裝光碟），目前還無法讀取", "This ISO uses only the UDF format (for example, Windows installation media) and cannot be read yet").into()));
     }
     Ok(out)
 }

@@ -1,5 +1,6 @@
 //! 共用元件。尺寸依 Windows 11 規範：控制項高 32 px、4 px 圓角、圖示 16／20 px。
 
+use ziptool_core::L;
 use eframe::egui::{self, Align, FontId, Layout, RichText, Sense, Stroke, TextStyle, vec2};
 use egui_phosphor::regular as icon;
 
@@ -111,7 +112,7 @@ pub fn path_field(ui: &mut egui::Ui, lead: &str, value: &mut String) -> bool {
     let mut clicked = false;
     input_frame(ui, lead, |ui| {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            clicked = link(ui, "瀏覽…").clicked();
+            clicked = link(ui, L!("瀏覽…", "Browse…")).clicked();
             ui.add(egui::TextEdit::singleline(value).frame(egui::Frame::NONE).desired_width(ui.available_width()));
         });
     });
@@ -154,7 +155,7 @@ pub fn dialog_buttons(ui: &mut egui::Ui, ok_label: &str) -> (bool, bool) {
     let mut cancel = false;
     ui.add_space(12.0);
     ui.allocate_ui_with_layout(vec2(ui.available_width(), CONTROL_H), Layout::right_to_left(Align::Center), |ui| {
-        cancel = ui.add(secondary_button(ui, "取消")).clicked();
+        cancel = ui.add(secondary_button(ui, L!("取消", "Cancel"))).clicked();
         ok = ui.add(primary_button(ui, ok_label)).clicked();
     });
     let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));

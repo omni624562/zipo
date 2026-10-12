@@ -15,7 +15,6 @@ sevenz-rust2 = { version = "0.23.0", features = ["aes256", "compress"] }
 sha1 = "0.11"
 sha2 = "0.11"
 tar = "0.4.46"
-thiserror = "2.0.21"
 time = { version = "0.3.55", features = ["local-offset"] }
 walkdir = "2.5.0"
 xz2 = "0.1.7"

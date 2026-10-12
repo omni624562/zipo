@@ -1,6 +1,7 @@
 //! 分割壓縮檔（與 7-Zip 相同）：把壓縮檔依固定大小切成 `名稱.001`、`名稱.002`…，
 //! 依序接起來就是原本的壓縮檔。讀取時先接回暫存檔再處理。
 
+use crate::{F, L};
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -29,13 +30,13 @@ fn volume_paths(first: &Path) -> Result<Vec<PathBuf>> {
         n += 1;
     }
     if parts.is_empty() {
-        return Err(Error::Io(io::Error::new(io::ErrorKind::NotFound, format!("找不到 {}", first.display()))));
+        return Err(Error::Io(io::Error::new(io::ErrorKind::NotFound, F!("找不到 {}", "Cannot find {}", first.display()))));
     }
     // 後面還有編號較大的分割檔：代表中間缺了一個
     for later in n + 1..n + 1000 {
         if volume_path(first, later).is_file() {
             let missing = volume_path(first, n);
-            return Err(Error::Unsupported(format!("缺少分割檔「{}」", missing.file_name().unwrap_or_default().to_string_lossy())));
+            return Err(Error::Unsupported(F!("缺少分割檔「{}」", "Missing volume \"{}\"", missing.file_name().unwrap_or_default().to_string_lossy())));
         }
     }
     Ok(parts)
@@ -79,7 +80,7 @@ pub(crate) fn join_if_split(archive: &Path) -> Result<Option<Joined>> {
 /// 把 `path` 切成每個 `size` 位元組的分割檔，完成後刪除原檔；回傳所有分割檔
 pub(crate) fn split(path: &Path, size: u64) -> Result<Vec<PathBuf>> {
     if size == 0 {
-        return Err(Error::Unsupported("分割大小不可為 0".into()));
+        return Err(Error::Unsupported(L!("分割大小不可為 0", "The volume size cannot be 0").into()));
     }
     let first = {
         let mut name = path.file_name().unwrap_or_default().to_os_string();

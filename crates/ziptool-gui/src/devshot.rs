@@ -1,6 +1,6 @@
 //! 僅 debug 版：設定 `ZIPTOOL_SHOT=輸出.png` 時，自動截圖後關閉，用來檢查畫面。
 //! 選用：`ZIPTOOL_SHOT_OPEN=路徑`、`ZIPTOOL_SHOT_SELECT=選取前幾列`、
-//! `ZIPTOOL_SHOT_DIALOG=add|extract|info|about|update|updating`、`ZIPTOOL_SHOT_DARK=1`。
+//! `ZIPTOOL_SHOT_DIALOG=add|extract|info|about|update|updating`、`ZIPTOOL_SHOT_DARK=1`、`ZIPTOOL_SHOT_LANG=en|zh`。
 
 use std::path::PathBuf;
 
@@ -24,6 +24,9 @@ impl DevShot {
     pub fn from_env(ctx: &egui::Context) -> Option<(Self, Setup)> {
         let out = PathBuf::from(std::env::var_os("ZIPTOOL_SHOT")?);
         let dark = std::env::var("ZIPTOOL_SHOT_DARK").is_ok_and(|v| v == "1");
+        if let Ok(lang) = std::env::var("ZIPTOOL_SHOT_LANG") {
+            ziptool_core::i18n::set_english(lang == "en");
+        }
         ctx.set_theme(if dark { egui::Theme::Dark } else { egui::Theme::Light });
         let setup = Setup {
             open: std::env::var_os("ZIPTOOL_SHOT_OPEN").map(PathBuf::from),

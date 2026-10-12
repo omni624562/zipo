@@ -1,5 +1,6 @@
 //! 檔案瀏覽：本機磁碟、資料夾，以及壓縮檔內的虛擬資料夾。
 
+use ziptool_core::{F, L};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -19,7 +20,7 @@ pub enum Location {
 impl Location {
     pub fn display(&self) -> String {
         match self {
-            Location::Computer => "電腦".into(),
+            Location::Computer => L!("電腦", "Computer").into(),
             Location::Dir(p) => p.display().to_string(),
             Location::Archive { path, inner } if inner.is_empty() => format!("{}{}", path.display(), std::path::MAIN_SEPARATOR),
             Location::Archive { path, inner } => {
@@ -66,17 +67,17 @@ pub struct Row {
 impl Row {
     pub fn type_label(&self) -> String {
         if self.is_drive {
-            return "本機磁碟".into();
+            return L!("本機磁碟", "Local Disk").into();
         }
         if self.is_dir {
-            return "資料夾".into();
+            return L!("資料夾", "Folder").into();
         }
         if let Some(f) = Format::from_file_name(&self.name) {
-            return format!("{} 壓縮檔", f.name());
+            return F!("{} 壓縮檔", "{} archive", f.name());
         }
         match self.name.rsplit_once('.') {
-            Some((_, ext)) if !ext.is_empty() => format!("{} 檔案", ext.to_ascii_uppercase()),
-            _ => "檔案".into(),
+            Some((_, ext)) if !ext.is_empty() => F!("{} 檔案", "{} file", ext.to_ascii_uppercase()),
+            _ => L!("檔案", "File").into(),
         }
     }
 }

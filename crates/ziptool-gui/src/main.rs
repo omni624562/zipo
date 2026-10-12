@@ -3,6 +3,7 @@
 
 //! Zipo 檔案管理員：版面與操作方式參考 7-Zip File Manager。
 
+use ziptool_core::{F, L};
 mod browser;
 #[cfg(debug_assertions)]
 mod devshot;
@@ -40,7 +41,11 @@ fn install_panic_hook() {
     std::panic::set_hook(Box::new(move |info| {
         let log = std::env::temp_dir().join("Zipo").join("crash.log");
         let bt = std::backtrace::Backtrace::force_capture();
-        let text = format!("Zipo {} 發生錯誤
+        let text = F!("Zipo {} 發生錯誤
+{info}
+
+{bt}
+", "Zipo {} ran into an error
 {info}
 
 {bt}
@@ -56,10 +61,13 @@ fn install_panic_hook() {
         if std::thread::current().name() == Some("main") && !will_retry {
             rfd::MessageDialog::new()
                 .set_level(rfd::MessageLevel::Error)
-                .set_title("Zipo 發生錯誤")
-                .set_description(format!("{info}
+                .set_title(L!("Zipo 發生錯誤", "Zipo ran into an error"))
+                .set_description(F!("{info}
 
 詳細資訊已寫入：
+{}", "{info}
+
+Details were written to:
 {}", log.display()))
                 .show();
         }
@@ -117,7 +125,7 @@ fn run_app() -> eframe::Result {
                 .find(|a| a.get_info().backend == eframe::wgpu::Backend::Dx12)
                 .or_else(|| adapters.iter().find(usable))
                 .cloned()
-                .ok_or_else(|| "找不到可用的顯示卡".to_string())
+                .ok_or_else(|| L!("找不到可用的顯示卡", "No usable graphics adapter was found").to_string())
         }));
     }
     let start = parse_args(std::env::args_os().skip(1).collect());
@@ -132,6 +140,7 @@ fn run_app() -> eframe::Result {
                 _ => None,
             };
             let mut app = App::with_storage(open, cc.storage);
+            ziptool_core::i18n::set_english(app.language.english());
             app.apply_start(start);
             if let Ok(exe) = std::env::current_exe() {
                 update::cleanup_old(&exe);
@@ -324,6 +333,41 @@ fn file_stamp(p: &Path) -> Option<(u64, Option<SystemTime>)> {
     std::fs::metadata(p).ok().map(|m| (m.len(), m.modified().ok()))
 }
 
+/// 介面語言的設定
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Language {
+    /// 依系統的顯示語言
+    Auto,
+    Chinese,
+    English,
+}
+
+impl Language {
+    fn key(self) -> &'static str {
+        match self {
+            Language::Auto => "auto",
+            Language::Chinese => "zh",
+            Language::English => "en",
+        }
+    }
+
+    fn from_key(k: &str) -> Self {
+        match k {
+            "zh" => Language::Chinese,
+            "en" => Language::English,
+            _ => Language::Auto,
+        }
+    }
+
+    fn english(self) -> bool {
+        match self {
+            Language::Auto => ziptool_core::i18n::system_prefers_english(),
+            Language::Chinese => false,
+            Language::English => true,
+        }
+    }
+}
+
 /// 預覽窗格目前顯示的項目
 struct Preview {
     /// 位置與名稱；選取改變時重新讀取
@@ -480,6 +524,7 @@ struct App {
     drag_cache: Vec<DragCache>,
     /// 顯示預覽窗格（檢視 › 預覽窗格，Alt+P）
     preview_open: bool,
+    language: Language,
     preview: Option<Preview>,
     last_watch_check: std::time::Instant,
     /// 效能診斷（設定 ZIPTOOL_PERF 時啟用）
@@ -532,6 +577,7 @@ impl App {
             open_after: false,
             watched: Vec::new(),
             preview_open: false,
+            language: Language::Auto,
             preview: None,
             nested: Vec::new(),
             drag_cache: Vec::new(),
@@ -545,6 +591,7 @@ impl App {
         app.auto_update = get("auto_update").as_deref() != Some("0");
         app.open_after = get("open_after").as_deref() == Some("1");
         app.preview_open = get("preview").as_deref() == Some("1");
+        app.language = Language::from_key(get("language").as_deref().unwrap_or("auto"));
         app.last_update_check = get("last_update_check").and_then(|v| v.parse().ok()).unwrap_or(0);
         if let Some(k) = get("sort_key") {
             app.sort_key = match k.as_str() {
@@ -620,6 +667,7 @@ impl App {
         storage.set_string("auto_update", if self.auto_update { "1" } else { "0" }.into());
         storage.set_string("open_after", if self.open_after { "1" } else { "0" }.into());
         storage.set_string("preview", if self.preview_open { "1" } else { "0" }.into());
+        storage.set_string("language", self.language.key().into());
         storage.set_string("last_update_check", self.last_update_check.to_string());
         storage.set_string("zip_codepage", ziptool_core::zip_codepage().map(|c| c.to_string()).unwrap_or_default());
     }
@@ -635,7 +683,7 @@ impl App {
             }
             self.navigate(Location::Archive { path: p, inner: String::new() });
         } else {
-            self.status_error = Some(format!("找不到：{}", p.display()));
+            self.status_error = Some(F!("找不到：{}", "Not found: {}", p.display()));
         }
     }
 
@@ -655,11 +703,11 @@ impl App {
                 Ok(r) => r,
                 Err(e) => {
                     let why = if e.kind() == std::io::ErrorKind::PermissionDenied {
-                        "沒有讀取這個資料夾的權限".to_string()
+                        L!("沒有讀取這個資料夾的權限", "You don't have permission to read this folder").to_string()
                     } else {
                         ziptool_core::describe(&e)
                     };
-                    self.status_error = Some(format!("無法開啟 {}：{why}", p.display()));
+                    self.status_error = Some(F!("無法開啟 {}：{why}", "Cannot open {}: {why}", p.display()));
                     self.addr = self.loc.display();
                     return;
                 }
@@ -780,11 +828,11 @@ impl App {
     fn read_only_reason(&self) -> Option<&'static str> {
         let Location::Archive { path, .. } = &self.loc else { return None };
         if self.is_nested(path) {
-            Some(NESTED_READ_ONLY)
+            Some(nested_read_only())
         } else if ziptool_core::is_first_volume(path) {
-            Some("分割的壓縮檔無法直接修改。若要修改，請先解壓縮，再重新壓縮。")
+            Some(L!("分割的壓縮檔無法直接修改。若要修改，請先解壓縮，再重新壓縮。", "Split archives cannot be modified directly. To change it, extract it first and compress again."))
         } else if Format::from_file_name(&file_name(path)).is_some_and(|f| f.is_read_only()) {
-            Some("ISO 映像檔只能瀏覽與解壓縮，無法修改。")
+            Some(L!("ISO 映像檔只能瀏覽與解壓縮，無法修改。", "ISO images can only be browsed and extracted, not modified."))
         } else {
             None
         }
@@ -796,7 +844,7 @@ impl App {
 
     fn go_address(&mut self) {
         let text = self.addr.trim().trim_matches('"').to_string();
-        if text.is_empty() || text == "電腦" {
+        if text.is_empty() || text == L!("電腦", "Computer") {
             return self.navigate(Location::Computer);
         }
         // 也接受「壓縮檔路徑\內部資料夾\」
@@ -813,7 +861,7 @@ impl App {
                 return self.navigate(Location::Archive { path: anc.to_path_buf(), inner: inner.trim_matches('/').to_string() });
             }
         }
-        self.status_error = Some(format!("找不到路徑：{text}"));
+        self.status_error = Some(F!("找不到路徑：{text}", "Path not found: {text}"));
     }
 
     fn row_path(&self, r: &Row) -> Option<PathBuf> {
@@ -848,7 +896,7 @@ impl App {
                     open_path(&path);
                 } else {
                     // 不是可開啟的檔案（例如讀不到的連結）：不交給外部程式，避免跳出系統錯誤視窗
-                    self.status_error = Some(format!("無法開啟 {}", r.name));
+                    self.status_error = Some(F!("無法開啟 {}", "Cannot open {}", r.name));
                 }
             }
             Location::Archive { path, inner } => {
@@ -906,7 +954,7 @@ impl App {
         match ziptool_core::extract(&path, &dir, &opts, &ziptool_core::NoProgress) {
             Ok(r) if !r.issues.is_empty() => {
                 let i = &r.issues[0];
-                self.notice("無法拖曳", format!("{}：{}", i.name, i.reason));
+                self.notice(L!("無法拖曳", "Cannot drag"), F!("{}：{}", "{}: {}", i.name, i.reason));
                 return None;
             }
             Ok(_) => {}
@@ -920,7 +968,7 @@ impl App {
                 return None;
             }
             Err(e) => {
-                self.notice("無法拖曳", e.to_string());
+                self.notice(L!("無法拖曳", "Cannot drag"), e.to_string());
                 return None;
             }
         }
@@ -950,7 +998,7 @@ impl App {
 
     fn start_update_install(&mut self, release: update::Release) {
         let Ok(exe) = std::env::current_exe() else {
-            return self.notice("無法更新", "找不到目前執行的程式。");
+            return self.notice(L!("無法更新", "Cannot update"), L!("找不到目前執行的程式。", "Cannot find the running program."));
         };
         self.update_work = Some(UpdateWork::Install(std::thread::spawn(move || update::download_and_install(&release, &exe))));
         self.dialog = Some(Dialog::Updating);
@@ -968,24 +1016,24 @@ impl App {
         }
         if finished {
             match self.update_work.take() {
-                Some(UpdateWork::Check { manual, handle }) => match handle.join().unwrap_or_else(|_| Err("檢查更新時發生異常".into())) {
+                Some(UpdateWork::Check { manual, handle }) => match handle.join().unwrap_or_else(|_| Err(L!("檢查更新時發生異常", "An error occurred while checking for updates").into())) {
                     Ok(r) if update::is_newer(&r.version, env!("CARGO_PKG_VERSION")) => self.pending_release = Some(r),
-                    Ok(_) if manual => self.notice("已是最新版本", format!("目前使用的 Zipo {} 已是最新版本。", env!("CARGO_PKG_VERSION"))),
-                    Err(e) if manual => self.notice("無法檢查更新", e),
+                    Ok(_) if manual => self.notice(L!("已是最新版本", "You're up to date"), F!("目前使用的 Zipo {} 已是最新版本。", "Zipo {} is the latest version.", env!("CARGO_PKG_VERSION"))),
+                    Err(e) if manual => self.notice(L!("無法檢查更新", "Cannot check for updates"), e),
                     // 自動檢查失敗（例如沒有網路）不打擾使用者
                     _ => {}
                 },
-                Some(UpdateWork::Install(handle)) => match handle.join().unwrap_or_else(|_| Err("更新時發生異常".into())) {
+                Some(UpdateWork::Install(handle)) => match handle.join().unwrap_or_else(|_| Err(L!("更新時發生異常", "An error occurred while updating").into())) {
                     Ok(exe) => {
                         if let Err(e) = std::process::Command::new(&exe).spawn() {
-                            self.notice("更新完成", format!("新版本已安裝，但無法自動重新啟動（{e}）。請手動開啟 Zipo。"));
+                            self.notice(L!("更新完成", "Update complete"), F!("新版本已安裝，但無法自動重新啟動（{e}）。請手動開啟 Zipo。", "The new version is installed, but Zipo could not restart automatically ({e}). Please open Zipo yourself."));
                         } else {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         }
                     }
                     Err(e) => {
                         self.dialog = None;
-                        self.notice("更新失敗", format!("{e}\n\n原本的程式沒有變動。"));
+                        self.notice(L!("更新失敗", "Update failed"), F!("{e}\n\n原本的程式沒有變動。", "{e}\n\nThe installed program was not changed."));
                     }
                 },
                 None => {}
@@ -1002,14 +1050,14 @@ impl App {
 
     fn cmd_add(&mut self) {
         if matches!(self.loc, Location::Archive { .. }) {
-            if let Some(files) = rfd::FileDialog::new().set_title("選擇要加入壓縮檔的檔案").pick_files() {
+            if let Some(files) = rfd::FileDialog::new().set_title(L!("選擇要加入壓縮檔的檔案", "Choose files to add to the archive")).pick_files() {
                 self.confirm_add_into_archive(files);
             }
             return;
         }
         let paths: Vec<PathBuf> = self.selected_rows().iter().filter(|r| !r.is_drive).filter_map(|r| self.row_path(r)).collect();
         if paths.is_empty() {
-            return self.notice("加入", "請先選取要加入壓縮檔的檔案或資料夾。");
+            return self.notice(L!("加入", "Add"), L!("請先選取要加入壓縮檔的檔案或資料夾。", "Select the files or folders to compress first."));
         }
         self.dialog = Some(Dialog::Add(self.with_open_after_add(AddDialog::new(paths, self.add_format, self.add_level))));
     }
@@ -1018,42 +1066,42 @@ impl App {
     fn confirm_add_into_archive(&mut self, files: Vec<PathBuf>) {
         let Location::Archive { path, inner } = self.loc.clone() else { return };
         if let Some(why) = self.read_only_reason() {
-            return self.notice("加入", why);
+            return self.notice(L!("加入", "Add"), why);
         }
         if Format::detect(&path).is_ok_and(|f| f.is_single()) {
-            return self.notice("加入", "這種格式只能包含單一檔案，無法再加入其他檔案。");
+            return self.notice(L!("加入", "Add"), L!("這種格式只能包含單一檔案，無法再加入其他檔案。", "This format can contain only a single file; no other files can be added."));
         }
         let names: Vec<String> = files.iter().take(3).map(|p| file_name(p)).collect();
-        let more = if files.len() > 3 { format!(" 等 {} 個項目", files.len()) } else { String::new() };
-        let place = if inner.is_empty() { "根目錄".to_string() } else { format!("「{inner}」資料夾") };
-        let message = format!("要把 {}{more} 加入 {} 的{place}嗎？\n壓縮檔中同名的項目會被取代。", names.join("、"), file_name(&path));
+        let more = if files.len() > 3 { F!(" 等 {} 個項目", " and {} items in total", files.len()) } else { String::new() };
+        let place = if inner.is_empty() { L!("根目錄", "the root").to_string() } else { F!("「{inner}」資料夾", "the \"{inner}\" folder") };
+        let message = F!("要把 {}{more} 加入 {} 的{place}嗎？\n壓縮檔中同名的項目會被取代。", "Add {}{more} to {place} of {}?\nItems with the same name in the archive will be replaced.", names.join(L!("、", ", ")), file_name(&path));
         let password = self.cache.as_ref().and_then(|c| c.password.clone());
         let task = Task::Update { archive: path, add: files, into: inner, remove: Vec::new(), password };
-        self.dialog = Some(Dialog::ConfirmUpdate { task, title: "加入到壓縮檔".into(), message, danger: false });
+        self.dialog = Some(Dialog::ConfirmUpdate { task, title: L!("加入到壓縮檔", "Add to archive").into(), message, danger: false });
     }
 
     fn cmd_delete(&mut self) {
         let Location::Archive { path, .. } = self.loc.clone() else {
-            return self.notice("刪除", "刪除只能用在壓縮檔內的項目。Zipo 不會刪除你電腦上的檔案。");
+            return self.notice(L!("刪除", "Delete"), L!("刪除只能用在壓縮檔內的項目。Zipo 不會刪除你電腦上的檔案。", "Delete only works on items inside an archive. Zipo never deletes files on your computer."));
         };
         if let Some(why) = self.read_only_reason() {
-            return self.notice("刪除", why);
+            return self.notice(L!("刪除", "Delete"), why);
         }
         let remove: Vec<String> = self.selected_rows().iter().map(|r| self.inner_name(r)).collect();
         if remove.is_empty() {
-            return self.notice("刪除", "請先選取要從壓縮檔刪除的項目。");
+            return self.notice(L!("刪除", "Delete"), L!("請先選取要從壓縮檔刪除的項目。", "Select the items to delete from the archive first."));
         }
         if Format::detect(&path).is_ok_and(|f| f.is_single()) {
-            return self.notice("刪除", "這種格式只能包含單一檔案，無法刪除其中的項目。");
+            return self.notice(L!("刪除", "Delete"), L!("這種格式只能包含單一檔案，無法刪除其中的項目。", "This format contains only a single file; its contents cannot be deleted."));
         }
-        let message = format!(
-            "要從 {} 刪除選取的 {} 個項目嗎？\n資料夾會連同其中的內容一起刪除，這個動作無法復原。",
+        let message = F!(
+            "要從 {} 刪除選取的 {} 個項目嗎？\n資料夾會連同其中的內容一起刪除，這個動作無法復原。", "Delete the {1} selected item(s) from {0}?\nFolders are deleted with their contents. This cannot be undone.",
             file_name(&path),
             remove.len()
         );
         let password = self.cache.as_ref().and_then(|c| c.password.clone());
         let task = Task::Update { archive: path, add: Vec::new(), into: String::new(), remove, password };
-        self.dialog = Some(Dialog::ConfirmUpdate { task, title: "從壓縮檔刪除".into(), message, danger: true });
+        self.dialog = Some(Dialog::ConfirmUpdate { task, title: L!("從壓縮檔刪除", "Delete from archive").into(), message, danger: true });
     }
 
     fn cmd_extract(&mut self) {
@@ -1073,7 +1121,7 @@ impl App {
                 let files: Vec<PathBuf> =
                     self.selected_rows().iter().filter(|r| r.is_archive).filter_map(|r| self.row_path(r)).collect();
                 if files.is_empty() {
-                    return self.notice("解壓縮", "請先選取要解壓縮的壓縮檔。");
+                    return self.notice(L!("解壓縮", "Extract"), L!("請先選取要解壓縮的壓縮檔。", "Select the archives to extract first."));
                 }
                 ExtractSource::Files(files)
             }
@@ -1092,7 +1140,7 @@ impl App {
                 let files: Vec<PathBuf> =
                     self.selected_rows().iter().filter(|r| r.is_archive).filter_map(|r| self.row_path(r)).collect();
                 if files.is_empty() {
-                    return self.notice("測試", "請先選取要測試的壓縮檔。");
+                    return self.notice(L!("測試", "Test"), L!("請先選取要測試的壓縮檔。", "Select the archives to test first."));
                 }
                 self.spawn(Task::Test { archives: files, password: None });
             }
@@ -1108,51 +1156,51 @@ impl App {
                 let dirs = c.entries.iter().filter(|e| e.is_dir).count();
                 let size: u64 = c.entries.iter().filter_map(|e| e.size).sum();
                 let packed = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-                lines.push(("路徑".into(), path.display().to_string()));
-                lines.push(("格式".into(), Format::detect(path).map(|f| f.name().to_string()).unwrap_or_default()));
-                lines.push(("檔案".into(), files.to_string()));
-                lines.push(("資料夾".into(), dirs.to_string()));
-                lines.push(("原始大小".into(), human(size)));
-                lines.push(("壓縮檔大小".into(), human(packed)));
+                lines.push((L!("路徑", "Path").into(), path.display().to_string()));
+                lines.push((L!("格式", "Format").into(), Format::detect(path).map(|f| f.name().to_string()).unwrap_or_default()));
+                lines.push((L!("檔案", "File").into(), files.to_string()));
+                lines.push((L!("資料夾", "Folder").into(), dirs.to_string()));
+                lines.push((L!("原始大小", "Original size").into(), human(size)));
+                lines.push((L!("壓縮檔大小", "Archive size").into(), human(packed)));
                 if size > 0 {
-                    lines.push(("壓縮率".into(), format!("{:.1}%", packed as f64 * 100.0 / size as f64)));
+                    lines.push((L!("壓縮率", "Ratio").into(), format!("{:.1}%", packed as f64 * 100.0 / size as f64)));
                 }
-                lines.push(("加密".into(), if c.entries.iter().any(|e| e.encrypted) || c.password.is_some() { "是" } else { "否" }.into()));
+                lines.push((L!("加密", "Encryption").into(), if c.entries.iter().any(|e| e.encrypted) || c.password.is_some() { L!("是", "Yes") } else { L!("否", "No") }.into()));
                 let title = file_name(path);
                 self.dialog = Some(Dialog::Info { title, lines });
             } else {
-                self.notice("內容", "請先選取項目。");
+                self.notice(L!("內容", "Properties"), L!("請先選取項目。", "Select an item first."));
             }
             return;
         }
         let size: u64 = rows.iter().filter_map(|r| r.size).sum();
         if rows.len() == 1 {
             let r = rows[0];
-            lines.push(("名稱".into(), r.display.clone()));
+            lines.push((L!("名稱", "Name").into(), r.display.clone()));
             if r.display != r.name {
-                lines.push(("實際名稱".into(), r.name.clone()));
+                lines.push((L!("實際名稱", "Actual name").into(), r.name.clone()));
             }
-            lines.push(("類型".into(), r.type_label()));
+            lines.push((L!("類型", "Type").into(), r.type_label()));
             if let Some(p) = self.row_path(r) {
-                lines.push(("位置".into(), p.parent().map(|d| d.display().to_string()).unwrap_or_default()));
+                lines.push((L!("位置", "Location").into(), p.parent().map(|d| d.display().to_string()).unwrap_or_default()));
             } else {
-                lines.push(("位置".into(), self.loc.display()));
+                lines.push((L!("位置", "Location").into(), self.loc.display()));
             }
         } else {
-            lines.push(("項目".into(), format!("{} 個", rows.len())));
+            lines.push((L!("項目", "Items").into(), F!("{} 個", "{}", rows.len())));
         }
-        lines.push(("大小".into(), format!("{}（{} 位元組）", human(size), size)));
+        lines.push((L!("大小", "Size").into(), F!("{}（{} 位元組）", "{} ({} bytes)", human(size), size)));
         if rows.iter().any(|r| r.packed.is_some()) {
             let packed: u64 = rows.iter().filter_map(|r| r.packed).sum();
-            lines.push(("壓縮後".into(), human(packed)));
+            lines.push((L!("壓縮後", "Packed").into(), human(packed)));
         }
         if rows.len() == 1 && rows[0].modified.is_some() {
-            lines.push(("修改日期".into(), format_time(rows[0].modified)));
+            lines.push((L!("修改日期", "Modified").into(), format_time(rows[0].modified)));
         }
         if rows.iter().any(|r| r.encrypted) {
-            lines.push(("加密".into(), "是".into()));
+            lines.push((L!("加密", "Encryption").into(), L!("是", "Yes").into()));
         }
-        let title = if rows.len() == 1 { rows[0].display.clone() } else { "內容".into() };
+        let title = if rows.len() == 1 { rows[0].display.clone() } else { L!("內容", "Properties").into() };
         self.dialog = Some(Dialog::Info { title, lines });
     }
 
@@ -1191,7 +1239,7 @@ impl App {
                     else {
                         unreachable!()
                     };
-                    p.state = PreviewState::Ready(h.join().unwrap_or_else(|_| preview::Content::Unavailable("讀取時發生異常".into())));
+                    p.state = PreviewState::Ready(h.join().unwrap_or_else(|_| preview::Content::Unavailable(L!("讀取時發生異常", "An error occurred while reading").into())));
                 } else {
                     ctx.request_repaint_after(Duration::from_millis(50));
                 }
@@ -1211,8 +1259,8 @@ impl App {
                     let password = self.cache.as_ref().and_then(|c| c.password.clone());
                     PreviewState::Loading(std::thread::spawn(move || preview_inside(&archive, &entry, &strip, password)))
                 }
-                Location::Archive { .. } => PreviewState::Ready(preview::Content::Unavailable(format!(
-                    "超過 {} 的檔案不預覽",
+                Location::Archive { .. } => PreviewState::Ready(preview::Content::Unavailable(F!(
+                    "超過 {} 的檔案不預覽", "Files larger than {} are not previewed",
                     ziptool_core::format_size(preview::MAX_ARCHIVE_PREVIEW)
                 ))),
                 Location::Computer => return,
@@ -1224,7 +1272,7 @@ impl App {
     fn preview_pane(&mut self, ui: &mut egui::Ui) {
         let p = pal(ui);
         let Some(pv) = &mut self.preview else {
-            ui.centered_and_justified(|ui| ui.label(RichText::new("選取檔案以預覽").color(p.text2)));
+            ui.centered_and_justified(|ui| ui.label(RichText::new(L!("選取檔案以預覽", "Select a file to preview")).color(p.text2)));
             return;
         };
         ui.add(egui::Label::new(RichText::new(&pv.name).strong().color(p.text)).wrap());
@@ -1255,12 +1303,12 @@ impl App {
                 egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
                     ui.add(egui::Label::new(RichText::new(text.as_str()).monospace().size(12.5).color(p.text)).selectable(true).extend());
                     if *truncated {
-                        ui.label(RichText::new("（只顯示開頭的部分）").size(12.0).color(p.text2));
+                        ui.label(RichText::new(L!("（只顯示開頭的部分）", "(only the beginning is shown)")).size(12.0).color(p.text2));
                     }
                 });
             }
             PreviewState::Ready(preview::Content::Unavailable(why)) => {
-                ui.label(RichText::new(if why.is_empty() { "這種檔案無法預覽" } else { why.as_str() }).color(p.text2));
+                ui.label(RichText::new(if why.is_empty() { L!("這種檔案無法預覽", "This kind of file cannot be previewed") } else { why.as_str() }).color(p.text2));
             }
         }
     }
@@ -1323,7 +1371,7 @@ impl App {
     fn cmd_hash(&mut self) {
         let rows: Vec<Row> = self.selected_rows().into_iter().filter(|r| !r.is_drive).cloned().collect();
         if rows.is_empty() {
-            return self.notice("計算雜湊值", "請先選取檔案或資料夾。");
+            return self.notice(L!("計算雜湊值", "Calculate hashes"), L!("請先選取檔案或資料夾。", "Select a file or folder first."));
         }
         let task = match &self.loc {
             Location::Archive { path, inner } => Task::HashInside {
@@ -1347,7 +1395,7 @@ impl App {
     fn poll(&mut self, ctx: &egui::Context) {
         if self.loading.as_ref().is_some_and(|l| l.handle.is_finished()) {
             let l = self.loading.take().unwrap();
-            match l.handle.join().unwrap_or_else(|_| Err(Error::Unsupported("讀取時發生異常".into()))) {
+            match l.handle.join().unwrap_or_else(|_| Err(Error::Unsupported(L!("讀取時發生異常", "An error occurred while reading").into()))) {
                 Ok(entries) => {
                     let stamp = file_stamp(&l.path).unwrap_or((0, None));
                     let format = Format::detect(&l.path).map(|f| f.name()).unwrap_or("?");
@@ -1366,7 +1414,7 @@ impl App {
                     )));
                 }
                 Err(e) => {
-                    self.status_error = Some(format!("無法開啟 {}：{e}", file_name(&l.path)));
+                    self.status_error = Some(F!("無法開啟 {}：{e}", "Cannot open {}: {e}", file_name(&l.path)));
                     self.addr = self.loc.display();
                 }
             }
@@ -1439,10 +1487,10 @@ impl App {
                 Err(e @ Error::PossibleBomb { .. }) => {
                     self.dialog = Some(Dialog::ConfirmBomb { task, message: e.to_string() });
                 }
-                Err(Error::Cancelled) => self.status_error = Some("已取消".into()),
+                Err(Error::Cancelled) => self.status_error = Some(L!("已取消", "Cancelled").into()),
                 Err(e) => {
                     self.dialog = Some(Dialog::Notice {
-                        title: "發生錯誤".into(),
+                        title: L!("發生錯誤", "Error").into(),
                         message: e.to_string(),
                         ok: false,
                         open_dir: None,
@@ -1458,35 +1506,35 @@ impl App {
     /// 「檢視」選單：重新整理、排序、顯示系統項目、ZIP 檔名編碼、深淺色
     fn view_menu(&mut self, ui: &mut egui::Ui) {
         ui.set_min_width(220.0);
-        if ui.button(format!("{}  重新整理\tF5", icon::ARROWS_CLOCKWISE)).clicked() {
+        if ui.button(F!("{}  重新整理\tF5", "{}  Refresh\tF5", icon::ARROWS_CLOCKWISE)).clicked() {
             self.refresh();
         }
         ui.separator();
-        ui.label(RichText::new("排序方式").size(12.0).color(pal(ui).text2));
-        for (key, label) in [(SortKey::Name, "名稱"), (SortKey::Modified, "修改日期"), (SortKey::Type, "類型"), (SortKey::Size, "大小")] {
+        ui.label(RichText::new(L!("排序方式", "Sort by")).size(12.0).color(pal(ui).text2));
+        for (key, label) in [(SortKey::Name, L!("名稱", "Name")), (SortKey::Modified, L!("修改日期", "Modified")), (SortKey::Type, L!("類型", "Type")), (SortKey::Size, L!("大小", "Size"))] {
             if ui.radio(self.sort_key == key, label).clicked() {
                 self.sort_key = key;
                 self.resort();
             }
         }
         ui.separator();
-        ui.checkbox(&mut self.preview_open, "預覽窗格\tAlt+P").on_hover_text("在右側預覽選取的圖片或文字檔");
+        ui.checkbox(&mut self.preview_open, L!("預覽窗格\tAlt+P", "Preview pane\tAlt+P")).on_hover_text(L!("在右側預覽選取的圖片或文字檔", "Preview the selected image or text file on the right"));
         if ui
-            .checkbox(&mut self.show_system, "顯示受保護的系統項目")
-            .on_hover_text("例如家目錄中的 My Documents、Application Data 等相容性連結；檔案總管預設也不顯示")
+            .checkbox(&mut self.show_system, L!("顯示受保護的系統項目", "Show protected system items"))
+            .on_hover_text(L!("例如家目錄中的 My Documents、Application Data 等相容性連結；檔案總管預設也不顯示", "For example compatibility links such as My Documents and Application Data in your home folder; File Explorer hides them too"))
             .changed()
         {
             self.refresh();
         }
-        ui.menu_button("ZIP 檔名編碼", |ui| {
+        ui.menu_button(L!("ZIP 檔名編碼", "ZIP file name encoding"), |ui| {
             let current = ziptool_core::zip_codepage();
             let choices = [
-                (None, "自動（依系統）"),
-                (Some(950), "繁體中文（Big5）"),
-                (Some(936), "簡體中文（GBK）"),
-                (Some(932), "日文（Shift_JIS）"),
-                (Some(949), "韓文（EUC-KR）"),
-                (Some(1252), "西歐語系（Windows-1252）"),
+                (None, L!("自動（依系統）", "Automatic (system)")),
+                (Some(950), L!("繁體中文（Big5）", "Traditional Chinese (Big5)")),
+                (Some(936), L!("簡體中文（GBK）", "Simplified Chinese (GBK)")),
+                (Some(932), L!("日文（Shift_JIS）", "Japanese (Shift_JIS)")),
+                (Some(949), L!("韓文（EUC-KR）", "Korean (EUC-KR)")),
+                (Some(1252), L!("西歐語系（Windows-1252）", "Western European (Windows-1252)")),
             ];
             for (cp, label) in choices {
                 if ui.radio(current == cp, label).clicked() {
@@ -1496,10 +1544,10 @@ impl App {
             }
         })
         .response
-        .on_hover_text("舊式 zip（例如 Windows 內建壓縮產生的）沒有記錄檔名編碼；中文檔名出現亂碼時可在這裡切換");
+        .on_hover_text(L!("舊式 zip（例如 Windows 內建壓縮產生的）沒有記錄檔名編碼；中文檔名出現亂碼時可在這裡切換", "Older zips (for example those made by Windows) don't record the file name encoding; switch here if names look garbled"));
         ui.separator();
         let dark = ui.visuals().dark_mode;
-        let (glyph, label) = if dark { (icon::SUN, "淺色模式") } else { (icon::MOON, "深色模式") };
+        let (glyph, label) = if dark { (icon::SUN, L!("淺色模式", "Light mode")) } else { (icon::MOON, L!("深色模式", "Dark mode")) };
         if ui.button(format!("{glyph}  {label}")).clicked() {
             ui.ctx().set_theme(if dark { egui::Theme::Light } else { egui::Theme::Dark });
         }
@@ -1508,26 +1556,26 @@ impl App {
     /// 「⋯」選單：開啟壓縮檔、選取、檔案總管整合、關於、結束
     fn more_menu(&mut self, ui: &mut egui::Ui) {
         ui.set_min_width(220.0);
-        if ui.button(format!("{}  開啟壓縮檔…", icon::FOLDER_OPEN)).clicked()
+        if ui.button(F!("{}  開啟壓縮檔…", "{}  Open archive…", icon::FOLDER_OPEN)).clicked()
             && let Some(p) = rfd::FileDialog::new().pick_file()
         {
             self.open_path_arg(p);
         }
         ui.separator();
-        if ui.button(format!("{}  全選\tCtrl+A", icon::CHECK_SQUARE)).clicked() {
+        if ui.button(F!("{}  全選\tCtrl+A", "{}  Select all\tCtrl+A", icon::CHECK_SQUARE)).clicked() {
             self.sel = (0..self.rows.len()).collect();
         }
-        if ui.button(format!("{}  取消選取", icon::SQUARE)).clicked() {
+        if ui.button(F!("{}  取消選取", "{}  Select none", icon::SQUARE)).clicked() {
             self.sel.clear();
         }
-        if ui.button(format!("{}  反向選取", icon::SWAP)).clicked() {
+        if ui.button(F!("{}  反向選取", "{}  Invert selection", icon::SWAP)).clicked() {
             self.sel = (0..self.rows.len()).filter(|i| !self.sel.contains(i)).collect();
         }
         ui.separator();
         let installed = shell::is_installed(shell::ROOT);
-        let label = if installed { "移除檔案總管右鍵選單" } else { "加入檔案總管右鍵選單" };
+        let label = if installed { L!("移除檔案總管右鍵選單", "Remove from File Explorer context menu") } else { L!("加入檔案總管右鍵選單", "Add to File Explorer context menu") };
         let r = ui.button(format!("{}  {label}", icon::CURSOR_CLICK)).on_hover_text(
-            "在檔案總管的右鍵選單加入「加入壓縮檔」「解壓縮到這裡」等項目（Windows 11 位於「顯示其他選項」）。\n只修改目前使用者的設定，隨時可以移除。",
+            L!("在檔案總管的右鍵選單加入「加入壓縮檔」「解壓縮到這裡」等項目（Windows 11 位於「顯示其他選項」）。\n只修改目前使用者的設定，隨時可以移除。", "Adds items such as \"Add to archive\" and \"Extract here\" to the File Explorer context menu (on Windows 11, under \"Show more options\").\nOnly the current user's settings are changed, and it can be removed at any time."),
         );
         if r.clicked() {
             let res = if installed {
@@ -1536,46 +1584,55 @@ impl App {
                 std::env::current_exe().and_then(|exe| shell::install(shell::ROOT, &exe))
             };
             let (title, msg) = match (res, installed) {
-                (Ok(()), false) => ("已加入右鍵選單", "在檔案總管中對檔案或壓縮檔按右鍵即可使用。Windows 11 請先點選「顯示其他選項」。".to_string()),
-                (Ok(()), true) => ("已移除右鍵選單", "檔案總管的右鍵選單已恢復原狀。".to_string()),
-                (Err(e), _) => ("無法變更右鍵選單", ziptool_core::describe(&e)),
+                (Ok(()), false) => (L!("已加入右鍵選單", "Context menu added"), L!("在檔案總管中對檔案或壓縮檔按右鍵即可使用。Windows 11 請先點選「顯示其他選項」。", "Right-click a file or archive in File Explorer to use it. On Windows 11, choose \"Show more options\" first.").to_string()),
+                (Ok(()), true) => (L!("已移除右鍵選單", "Context menu removed"), L!("檔案總管的右鍵選單已恢復原狀。", "The File Explorer context menu has been restored.").to_string()),
+                (Err(e), _) => (L!("無法變更右鍵選單", "Cannot change the context menu"), ziptool_core::describe(&e)),
             };
             self.notice(title, msg);
         }
-        let r = ui.button(format!("{}  設為壓縮檔預設程式…", icon::ARCHIVE)).on_hover_text(
-            "讓 Zipo 成為 .zip、.7z 等壓縮檔的預設開啟程式。\nWindows 不允許程式自行變更預設程式，接下來會開啟「設定」，請在那裡選取 Zipo。",
+        let r = ui.button(F!("{}  設為壓縮檔預設程式…", "{}  Set as default app for archives…", icon::ARCHIVE)).on_hover_text(
+            L!("讓 Zipo 成為 .zip、.7z 等壓縮檔的預設開啟程式。\nWindows 不允許程式自行變更預設程式，接下來會開啟「設定」，請在那裡選取 Zipo。", "Make Zipo the default app for .zip, .7z and other archives.\nWindows doesn't let apps change defaults themselves, so Settings will open next; choose Zipo there."),
         );
         if r.clicked() {
             match std::env::current_exe().and_then(|exe| shell::register_default(shell::SOFTWARE, &exe)) {
                 Ok(()) => {
                     shell::open_default_apps_settings();
                     self.notice(
-                        "請在「設定」中完成",
-                        "已開啟 Windows「設定 › 預設應用程式 › Zipo」。請點選 .zip（以及其他想要的格式），再選擇 Zipo。",
+                        L!("請在「設定」中完成", "Finish in Settings"),
+                        L!("已開啟 Windows「設定 › 預設應用程式 › Zipo」。請點選 .zip（以及其他想要的格式），再選擇 Zipo。", "Windows Settings › Default apps › Zipo is now open. Click .zip (and any other formats you want), then choose Zipo."),
                     );
                 }
-                Err(e) => self.notice("無法註冊預設程式", ziptool_core::describe(&e)),
+                Err(e) => self.notice(L!("無法註冊預設程式", "Cannot register as a default app"), ziptool_core::describe(&e)),
             }
         }
         if shell::is_default_registered(shell::SOFTWARE) {
-            let r = ui.button(format!("{}  移除預設程式註冊", icon::X_CIRCLE)).on_hover_text("從 Windows 的預設程式清單移除 Zipo。");
+            let r = ui.button(F!("{}  移除預設程式註冊", "{}  Remove default app registration", icon::X_CIRCLE)).on_hover_text(L!("從 Windows 的預設程式清單移除 Zipo。", "Remove Zipo from the Windows default apps list."));
             if r.clicked() {
                 match shell::unregister_default(shell::SOFTWARE) {
-                    Ok(()) => self.notice("已移除預設程式註冊", "壓縮檔會改由 Windows 原本的程式開啟。"),
-                    Err(e) => self.notice("無法移除預設程式註冊", ziptool_core::describe(&e)),
+                    Ok(()) => self.notice(L!("已移除預設程式註冊", "Default app registration removed"), L!("壓縮檔會改由 Windows 原本的程式開啟。", "Archives will open with the original Windows app again.")),
+                    Err(e) => self.notice(L!("無法移除預設程式註冊", "Cannot remove the default app registration"), ziptool_core::describe(&e)),
                 }
             }
         }
         ui.separator();
         let checking = matches!(self.update_work, Some(UpdateWork::Check { .. }));
-        if ui.add_enabled(!checking, egui::Button::new(format!("{}  檢查更新…", icon::ARROWS_CLOCKWISE))).clicked() {
+        if ui.add_enabled(!checking, egui::Button::new(F!("{}  檢查更新…", "{}  Check for updates…", icon::ARROWS_CLOCKWISE))).clicked() {
             self.start_update_check(true);
         }
-        ui.checkbox(&mut self.auto_update, "啟動時自動檢查更新");
-        if ui.button(format!("{}  關於 Zipo", icon::INFO)).clicked() {
+        ui.checkbox(&mut self.auto_update, L!("啟動時自動檢查更新", "Check for updates at startup"));
+        ui.separator();
+        // 兩種語言並列，切換錯了也找得回來
+        ui.label(RichText::new("語言 / Language").size(12.0).color(pal(ui).text2));
+        for (lang, label) in [(Language::Auto, L!("依系統設定", "System default")), (Language::Chinese, "繁體中文"), (Language::English, "English")] {
+            if ui.radio(self.language == lang, label).clicked() {
+                self.language = lang;
+                ziptool_core::i18n::set_english(lang.english());
+            }
+        }
+        if ui.button(F!("{}  關於 Zipo", "{}  About Zipo", icon::INFO)).clicked() {
             self.dialog = Some(Dialog::About);
         }
-        if ui.button(format!("{}  結束", icon::SIGN_OUT)).clicked() {
+        if ui.button(F!("{}  結束", "{}  Exit", icon::SIGN_OUT)).clicked() {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         }
     }
@@ -1612,23 +1669,23 @@ impl App {
                 }
             };
             if st.in_archive {
-                button(ui, true, icon::PLUS_CIRCLE, "加入", "選擇檔案加入目前開啟的壓縮檔", "", Action::Add);
+                button(ui, true, icon::PLUS_CIRCLE, L!("加入", "Add"), L!("選擇檔案加入目前開啟的壓縮檔", "Choose files to add to the open archive"), "", Action::Add);
             } else {
-                button(ui, st.compress, icon::FILE_ZIP, "壓縮", "把選取的檔案或資料夾壓縮成壓縮檔", "先選取要壓縮的檔案或資料夾", Action::Add);
+                button(ui, st.compress, icon::FILE_ZIP, L!("壓縮", "Compress"), L!("把選取的檔案或資料夾壓縮成壓縮檔", "Compress the selected files or folders into an archive"), L!("先選取要壓縮的檔案或資料夾", "Select files or folders to compress first"), Action::Add);
             }
-            let extract_tip = if st.in_archive { "解壓縮選取的項目（未選取則全部）" } else { "解壓縮選取的壓縮檔" };
-            button(ui, st.extract, icon::ARROW_SQUARE_OUT, "解壓縮", extract_tip, "選取的項目中沒有壓縮檔", Action::Extract);
-            button(ui, st.test, icon::SEAL_CHECK, "測試", "測試壓縮檔是否完整、沒有損壞", "選取的項目中沒有壓縮檔", Action::Test);
+            let extract_tip = if st.in_archive { L!("解壓縮選取的項目（未選取則全部）", "Extract the selected items (everything if nothing is selected)") } else { L!("解壓縮選取的壓縮檔", "Extract the selected archives") };
+            button(ui, st.extract, icon::ARROW_SQUARE_OUT, L!("解壓縮", "Extract"), extract_tip, L!("選取的項目中沒有壓縮檔", "No archive is selected"), Action::Extract);
+            button(ui, st.test, icon::SEAL_CHECK, L!("測試", "Test"), L!("測試壓縮檔是否完整、沒有損壞", "Test whether the archive is intact"), L!("選取的項目中沒有壓縮檔", "No archive is selected"), Action::Test);
             separator_v(ui);
-            button(ui, st.info, icon::INFO, "內容", "顯示選取項目的詳細資訊", "先選取項目", Action::Info);
+            button(ui, st.info, icon::INFO, L!("內容", "Properties"), L!("顯示選取項目的詳細資訊", "Show details of the selected items"), L!("先選取項目", "Select an item first"), Action::Info);
             // 刪除只用在壓縮檔內的項目；在一般資料夾不顯示，避免誤以為會刪除電腦上的檔案
             if st.in_archive {
-                button(ui, st.delete, icon::TRASH, "刪除", "從壓縮檔刪除選取的項目（Delete）", "先選取要刪除的項目", Action::Delete);
+                button(ui, st.delete, icon::TRASH, L!("刪除", "Delete"), L!("從壓縮檔刪除選取的項目（Delete）", "Delete the selected items from the archive (Delete)"), L!("先選取要刪除的項目", "Select items to delete first"), Action::Delete);
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let more = command_button(ui, icon::DOTS_THREE, None).on_hover_text("更多");
+                let more = command_button(ui, icon::DOTS_THREE, None).on_hover_text(L!("更多", "More"));
                 egui::Popup::menu(&more).show(|ui| self.more_menu(ui));
-                let view = command_button(ui, icon::SLIDERS_HORIZONTAL, Some("檢視")).on_hover_text("排序、顯示方式與外觀");
+                let view = command_button(ui, icon::SLIDERS_HORIZONTAL, Some(L!("檢視", "View"))).on_hover_text(L!("排序、顯示方式與外觀", "Sorting, display and appearance"));
                 egui::Popup::menu(&view).show(|ui| self.view_menu(ui));
             });
         });
@@ -1640,7 +1697,7 @@ impl App {
     /// 網址列上分段顯示的路徑：每一段都可以點選前往。
     fn breadcrumbs(&self) -> Vec<(String, Location)> {
         fn dir_parts(dir: &Path) -> Vec<(String, Location)> {
-            let mut out = vec![("本機".to_string(), Location::Computer)];
+            let mut out = vec![(L!("本機", "This PC").to_string(), Location::Computer)];
             let mut acc = PathBuf::new();
             for c in dir.components() {
                 match c {
@@ -1667,7 +1724,7 @@ impl App {
 
     fn crumbs_for(&self, loc: &Location, dir_parts: &dyn Fn(&Path) -> Vec<(String, Location)>) -> Vec<(String, Location)> {
         match loc {
-            Location::Computer => vec![("本機".into(), Location::Computer)],
+            Location::Computer => vec![(L!("本機", "This PC").into(), Location::Computer)],
             Location::Dir(d) => dir_parts(d),
             Location::Archive { path, inner } => {
                 // 壓縮檔內的壓縮檔：接在外層壓縮檔的路徑之後，不顯示暫存資料夾
@@ -1697,13 +1754,13 @@ impl App {
         let mut filter_changed = false;
         ui.allocate_ui_with_layout(vec2(w, CONTROL_H), Layout::left_to_right(Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            if ui.add_enabled_ui(!self.back.is_empty(), |ui| icon_button(ui, icon::ARROW_LEFT)).inner.on_hover_text("上一頁（Alt+←）").clicked() {
+            if ui.add_enabled_ui(!self.back.is_empty(), |ui| icon_button(ui, icon::ARROW_LEFT)).inner.on_hover_text(L!("上一頁（Alt+←）", "Back (Alt+←)")).clicked() {
                 self.go_back();
             }
-            if ui.add_enabled_ui(!self.forward.is_empty(), |ui| icon_button(ui, icon::ARROW_RIGHT)).inner.on_hover_text("下一頁（Alt+→）").clicked() {
+            if ui.add_enabled_ui(!self.forward.is_empty(), |ui| icon_button(ui, icon::ARROW_RIGHT)).inner.on_hover_text(L!("下一頁（Alt+→）", "Forward (Alt+→)")).clicked() {
                 self.go_forward();
             }
-            if ui.add_enabled_ui(self.loc.parent().is_some(), |ui| icon_button(ui, icon::ARROW_UP)).inner.on_hover_text("上一層（Backspace）").clicked() {
+            if ui.add_enabled_ui(self.loc.parent().is_some(), |ui| icon_button(ui, icon::ARROW_UP)).inner.on_hover_text(L!("上一層（Backspace）", "Up (Backspace)")).clicked() {
                 self.go_up();
             }
             ui.add_space(4.0);
@@ -1713,7 +1770,7 @@ impl App {
                         let r = ui.add(
                             egui::TextEdit::singleline(&mut self.filter)
                                 .frame(egui::Frame::NONE)
-                                .hint_text(if matches!(self.loc, Location::Archive { .. }) { format!("搜尋 {here}（含子資料夾）") } else { format!("搜尋 {here}") })
+                                .hint_text(if matches!(self.loc, Location::Archive { .. }) { F!("搜尋 {here}（含子資料夾）", "Search {here} (including subfolders)") } else { F!("搜尋 {here}", "Search {here}") })
                                 .desired_width(ui.available_width()),
                         );
                         filter_changed = r.changed();
@@ -1752,7 +1809,7 @@ impl App {
                                 .collect();
                             let first = first_visible_crumb(&widths, ui.available_width(), CRUMB_ELLIPSIS);
                             if first > 0 {
-                                let more = ui.add(egui::Button::new(RichText::new("…").color(p.text2)).frame(false)).on_hover_text("顯示上層資料夾");
+                                let more = ui.add(egui::Button::new(RichText::new("…").color(p.text2)).frame(false)).on_hover_text(L!("顯示上層資料夾", "Show parent folders"));
                                 egui::Popup::menu(&more).show(|ui| {
                                     for (label, loc) in crumbs[..first].iter().rev() {
                                         if ui.button(format!("{}  {label}", icon::FOLDER)).clicked() {
@@ -1803,8 +1860,8 @@ impl App {
             ui.vertical_centered(|ui| {
                 ui.add_space((ui.available_height() / 2.0 - 40.0).max(0.0));
                 ui.spinner();
-                ui.label(RichText::new(format!("正在讀取 {}…", file_name(&l.path))).color(p.text2));
-                stop = ui.add(secondary_button(ui, "取消")).clicked();
+                ui.label(RichText::new(F!("正在讀取 {}…", "Reading {}…", file_name(&l.path))).color(p.text2));
+                stop = ui.add(secondary_button(ui, L!("取消", "Cancel"))).clicked();
             });
             if stop {
                 // 放棄這次讀取；背景執行緒讀完後結果會被丟棄
@@ -1825,9 +1882,9 @@ impl App {
 
         // 欄位順序與檔案總管相同：名稱、修改日期、類型（壓縮檔內為壓縮後大小）、大小
         let cols: Vec<(SortKey, &str, bool)> = if in_archive {
-            vec![(SortKey::Name, "名稱", false), (SortKey::Modified, "修改日期", false), (SortKey::Packed, "壓縮後", true), (SortKey::Size, "大小", true)]
+            vec![(SortKey::Name, L!("名稱", "Name"), false), (SortKey::Modified, L!("修改日期", "Modified"), false), (SortKey::Packed, L!("壓縮後", "Packed"), true), (SortKey::Size, L!("大小", "Size"), true)]
         } else {
-            vec![(SortKey::Name, "名稱", false), (SortKey::Modified, "修改日期", false), (SortKey::Type, "類型", false), (SortKey::Size, "大小", true)]
+            vec![(SortKey::Name, L!("名稱", "Name"), false), (SortKey::Modified, L!("修改日期", "Modified"), false), (SortKey::Type, L!("類型", "Type"), false), (SortKey::Size, L!("大小", "Size"), true)]
         };
 
         let mut table = TableBuilder::new(ui)
@@ -1879,10 +1936,10 @@ impl App {
                         ui.label(RichText::new(row_icon(r)).size(16.0).color(row_icon_color(r, p)));
                         let name = ui.add(egui::Label::new(RichText::new(&r.display).color(p.text)).truncate().selectable(false));
                         if r.display != r.name {
-                            name.on_hover_text(format!("實際名稱：{}", r.name));
+                            name.on_hover_text(F!("實際名稱：{}", "Actual name: {}", r.name));
                         }
                         if r.encrypted {
-                            ui.label(RichText::new(icon::LOCK_SIMPLE).size(14.0).color(p.text2)).on_hover_text("已加密");
+                            ui.label(RichText::new(icon::LOCK_SIMPLE).size(14.0).color(p.text2)).on_hover_text(L!("已加密", "Encrypted"));
                         }
                     });
                     let num = |v: Option<u64>| v.map(human).unwrap_or_default();
@@ -1920,27 +1977,27 @@ impl App {
                     resp.context_menu(|ui| {
                         ui.set_min_width(170.0);
                         let is_archive_file = r.is_archive;
-                        if ui.button(format!("{}  開啟", icon::FOLDER_OPEN)).clicked() {
+                        if ui.button(F!("{}  開啟", "{}  Open", icon::FOLDER_OPEN)).clicked() {
                             ctx_action = Some(Action::Open);
                         }
                         ui.separator();
-                        if !in_archive && !r.is_drive && ui.button(format!("{}  壓縮…", icon::FILE_ARCHIVE)).clicked() {
+                        if !in_archive && !r.is_drive && ui.button(F!("{}  壓縮…", "{}  Compress…", icon::FILE_ARCHIVE)).clicked() {
                             ctx_action = Some(Action::Add);
                         }
-                        if (in_archive || is_archive_file) && ui.button(format!("{}  解壓縮…", icon::ARROW_SQUARE_OUT)).clicked() {
+                        if (in_archive || is_archive_file) && ui.button(F!("{}  解壓縮…", "{}  Extract…", icon::ARROW_SQUARE_OUT)).clicked() {
                             ctx_action = Some(Action::Extract);
                         }
-                        if (in_archive || is_archive_file) && ui.button(format!("{}  測試", icon::SEAL_CHECK)).clicked() {
+                        if (in_archive || is_archive_file) && ui.button(F!("{}  測試", "{}  Test", icon::SEAL_CHECK)).clicked() {
                             ctx_action = Some(Action::Test);
                         }
-                        if in_archive && !nested && ui.button(format!("{}  從壓縮檔刪除", icon::TRASH)).clicked() {
+                        if in_archive && !nested && ui.button(F!("{}  從壓縮檔刪除", "{}  Delete from archive", icon::TRASH)).clicked() {
                             ctx_action = Some(Action::Delete);
                         }
-                        if !r.is_drive && ui.button(format!("{}  計算雜湊值", icon::FINGERPRINT)).clicked() {
+                        if !r.is_drive && ui.button(F!("{}  計算雜湊值", "{}  Calculate hashes", icon::FINGERPRINT)).clicked() {
                             ctx_action = Some(Action::Hash);
                         }
                         ui.separator();
-                        if ui.button(format!("{}  內容", icon::INFO)).clicked() {
+                        if ui.button(F!("{}  內容", "{}  Properties", icon::INFO)).clicked() {
                             ctx_action = Some(Action::Info);
                         }
                     });
@@ -2012,18 +2069,18 @@ impl App {
                 ui.label(RichText::new(format!("{}  {e}", icon::WARNING_CIRCLE)).size(12.0).color(p.danger));
                 return;
             }
-            ui.label(RichText::new(format!("{} 個項目", self.rows.len())).size(12.0).color(p.text2));
+            ui.label(RichText::new(F!("{} 個項目", "{} items", self.rows.len())).size(12.0).color(p.text2));
             if !self.sel.is_empty() {
                 let size: u64 = self.sel.iter().filter_map(|&i| self.rows[i].size).sum();
                 let has_size = self.sel.iter().any(|&i| self.rows[i].size.is_some_and(|s| s > 0));
-                let size = if has_size { format!("，{}", human(size)) } else { String::new() };
-                ui.label(RichText::new(format!("已選取 {} 個項目{size}", self.sel.len())).size(12.0).color(p.text2));
+                let size = if has_size { F!("，{}", ", {}", human(size)) } else { String::new() };
+                ui.label(RichText::new(F!("已選取 {} 個項目{size}", "{} selected{size}", self.sel.len())).size(12.0).color(p.text2));
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if let (Location::Archive { .. }, Some(c)) = (&self.loc, &self.cache) {
                     let (fmt, size) = (c.format, c.stamp.0);
-                    let enc = if c.entries.iter().any(|e| e.encrypted) || c.password.is_some() { format!("  ·  {} 已加密", icon::LOCK_SIMPLE) } else { String::new() };
-                    ui.label(RichText::new(format!("{fmt} 壓縮檔  ·  {}{enc}", human(size))).size(12.0).color(p.text2));
+                    let enc = if c.entries.iter().any(|e| e.encrypted) || c.password.is_some() { F!("  ·  {} 已加密", "  ·  {} encrypted", icon::LOCK_SIMPLE) } else { String::new() };
+                    ui.label(RichText::new(F!("{fmt} 壓縮檔  ·  {}{enc}", "{fmt} archive  ·  {}{enc}", human(size))).size(12.0).color(p.text2));
                 }
             });
         });
@@ -2177,7 +2234,7 @@ impl App {
                 ui.set_width(460.0);
                 let (glyph, color) = if *ok { (icon::CHECK_CIRCLE, p.success) } else { (icon::INFO, p.accent) };
                 let (glyph, color) =
-                    if title == "發生錯誤" || !issues.is_empty() { (icon::WARNING_CIRCLE, p.danger) } else { (glyph, color) };
+                    if title == L!("發生錯誤", "Error") || !issues.is_empty() { (icon::WARNING_CIRCLE, p.danger) } else { (glyph, color) };
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(glyph).size(22.0).color(color));
                     ui.label(RichText::new(title.as_str()).size(16.0).strong().color(p.text));
@@ -2186,7 +2243,7 @@ impl App {
                 ui.add(egui::Label::new(RichText::new(message.as_str()).color(p.text)).wrap());
                 if !issues.is_empty() {
                     ui.add_space(6.0);
-                    ui.label(RichText::new(format!("略過 {} 個項目：", issues.len())).strong().color(p.text));
+                    ui.label(RichText::new(F!("略過 {} 個項目：", "{} item(s) skipped:", issues.len())).strong().color(p.text));
                     egui::Frame::new().fill(p.sunken).corner_radius(6).inner_margin(8).show(ui, |ui| {
                         egui::ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
                             ui.set_width(ui.available_width());
@@ -2200,9 +2257,9 @@ impl App {
                 ui.add_space(6.0);
                 let mut close = false;
                 ui.allocate_ui_with_layout(vec2(ui.available_width(), 32.0), Layout::right_to_left(Align::Center), |ui| {
-                    close = ui.add(primary_button(ui, "確定")).clicked();
+                    close = ui.add(primary_button(ui, L!("確定", "OK"))).clicked();
                     if let Some(d) = open_dir
-                        && ui.add(secondary_button(ui, "開啟資料夾")).clicked()
+                        && ui.add(secondary_button(ui, L!("開啟資料夾", "Open folder"))).clicked()
                     {
                         open_path(d);
                         close = true;
@@ -2216,16 +2273,16 @@ impl App {
                 ui.set_width(440.0);
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(icon::WARNING).size(22.0).color(p.danger));
-                    ui.label(RichText::new("這個壓縮檔的壓縮比異常高").size(16.0).strong().color(p.text));
+                    ui.label(RichText::new(L!("這個壓縮檔的壓縮比異常高", "This archive has an unusually high compression ratio")).size(16.0).strong().color(p.text));
                 });
                 ui.add_space(8.0);
                 ui.add(egui::Label::new(RichText::new(message.as_str()).color(p.text)).wrap());
-                ui.label(RichText::new("惡意的壓縮檔可能解出遠超過預期的資料、塞滿磁碟。只有在確定來源可信時才繼續。").color(p.text2));
+                ui.label(RichText::new(L!("惡意的壓縮檔可能解出遠超過預期的資料、塞滿磁碟。只有在確定來源可信時才繼續。", "A malicious archive can expand to far more data than expected and fill up the disk. Continue only if you trust the source.")).color(p.text2));
                 ui.add_space(6.0);
                 let (mut go, mut stop) = (false, false);
                 ui.allocate_ui_with_layout(vec2(ui.available_width(), 32.0), Layout::right_to_left(Align::Center), |ui| {
-                    stop = ui.add(primary_button(ui, "取消")).clicked();
-                    go = ui.add(secondary_button(ui, "仍要解壓縮")).clicked();
+                    stop = ui.add(primary_button(ui, L!("取消", "Cancel"))).clicked();
+                    go = ui.add(secondary_button(ui, L!("仍要解壓縮", "Extract anyway"))).clicked();
                 });
                 stop |= ui.input(|i| i.key_pressed(Key::Enter) || i.key_pressed(Key::Escape));
                 if go {
@@ -2248,8 +2305,8 @@ impl App {
                 ui.add_space(6.0);
                 let (mut go, mut stop) = (false, false);
                 ui.allocate_ui_with_layout(vec2(ui.available_width(), 32.0), Layout::right_to_left(Align::Center), |ui| {
-                    stop = ui.add(secondary_button(ui, "取消")).clicked();
-                    go = ui.add(primary_button(ui, if *danger { "刪除" } else { "加入" })).clicked();
+                    stop = ui.add(secondary_button(ui, L!("取消", "Cancel"))).clicked();
+                    go = ui.add(primary_button(ui, if *danger { L!("刪除", "Delete") } else { L!("加入", "Add") })).clicked();
                 });
                 // 刪除不接受 Enter，避免誤按
                 go |= !*danger && ui.input(|i| i.key_pressed(Key::Enter));
@@ -2264,16 +2321,16 @@ impl App {
                 ui.set_width(440.0);
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(icon::WARNING).size(22.0).color(p.danger));
-                    ui.label(RichText::new("要執行壓縮檔中的程式嗎？").size(16.0).strong().color(p.text));
+                    ui.label(RichText::new(L!("要執行壓縮檔中的程式嗎？", "Run a program from the archive?")).size(16.0).strong().color(p.text));
                 });
                 ui.add_space(8.0);
                 ui.label(RichText::new(name.as_str()).strong().color(p.text));
-                ui.label(RichText::new("這是可執行的檔案。來源不明的壓縮檔可能夾帶惡意程式，只有在確定來源可信時才執行。").color(p.text2));
+                ui.label(RichText::new(L!("這是可執行的檔案。來源不明的壓縮檔可能夾帶惡意程式，只有在確定來源可信時才執行。", "This is an executable file. Archives from unknown sources may contain malware; run it only if you trust the source.")).color(p.text2));
                 ui.add_space(6.0);
                 let (mut go, mut stop) = (false, false);
                 ui.allocate_ui_with_layout(vec2(ui.available_width(), 32.0), Layout::right_to_left(Align::Center), |ui| {
-                    stop = ui.add(primary_button(ui, "取消")).clicked();
-                    go = ui.add(secondary_button(ui, "執行")).clicked();
+                    stop = ui.add(primary_button(ui, L!("取消", "Cancel"))).clicked();
+                    go = ui.add(secondary_button(ui, L!("執行", "Run"))).clicked();
                 });
                 stop |= ui.input(|i| i.key_pressed(Key::Enter) || i.key_pressed(Key::Escape));
                 if go {
@@ -2285,8 +2342,8 @@ impl App {
                 let p = pal(ui);
                 ui.set_width(380.0);
                 dialog_title(ui, icon::FILE_ZIP, &format!("Zipo {}", env!("CARGO_PKG_VERSION")));
-                ui.label(RichText::new("以 7-Zip 為藍本、使用 Rust 撰寫的壓縮工具。").color(p.text));
-                ui.label(RichText::new("支援 7z、zip、tar、tar.gz、tar.bz2、tar.xz、tar.zst、gz、bz2、xz、zst。").color(p.text2));
+                ui.label(RichText::new(L!("以 7-Zip 為藍本、使用 Rust 撰寫的壓縮工具。", "An archiver modeled on 7-Zip, written in Rust.")).color(p.text));
+                ui.label(RichText::new(L!("支援 7z、zip、tar、tar.gz、tar.bz2、tar.xz、tar.zst、gz、bz2、xz、zst。", "Supports 7z, zip, tar, tar.gz, tar.bz2, tar.xz, tar.zst, gz, bz2, xz, zst and ISO.")).color(p.text2));
                 let (ok, cancel) = dialog_buttons_single(ui);
                 keep = !(ok || cancel);
             }
@@ -2295,28 +2352,30 @@ impl App {
                 ui.set_width(440.0);
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(icon::ARROW_CIRCLE_UP).size(22.0).color(p.accent));
-                    ui.label(RichText::new(format!("有新版本：Zipo {}", release.version)).size(16.0).strong().color(p.text));
+                    ui.label(RichText::new(F!("有新版本：Zipo {}", "New version: Zipo {}", release.version)).size(16.0).strong().color(p.text));
                 });
                 ui.add_space(8.0);
                 let detail = match &release.asset {
-                    Some(a) => format!(
+                    Some(a) => F!(
                         "目前使用的是 {}。
-更新檔約 {}，驗證完整後會取代程式並自動重新啟動。",
+更新檔約 {}，驗證完整後會取代程式並自動重新啟動。", "You're using {}.
+The update is about {}; once verified it replaces the program and restarts automatically.",
                         env!("CARGO_PKG_VERSION"),
                         ziptool_core::format_size(a.size)
                     ),
-                    None => format!("目前使用的是 {}。
-這個版本需要到下載頁面手動更新。", env!("CARGO_PKG_VERSION")),
+                    None => F!("目前使用的是 {}。
+這個版本需要到下載頁面手動更新。", "You're using {}.
+This version must be updated manually from the download page.", env!("CARGO_PKG_VERSION")),
                 };
                 ui.add(egui::Label::new(RichText::new(detail).color(p.text)).wrap());
-                if link(ui, "查看更新內容").clicked() {
+                if link(ui, L!("查看更新內容", "See what's new")).clicked() {
                     open_path(Path::new(&release.page));
                 }
                 ui.add_space(6.0);
                 let (mut go, mut later) = (false, false);
                 ui.allocate_ui_with_layout(vec2(ui.available_width(), 32.0), Layout::right_to_left(Align::Center), |ui| {
-                    later = ui.add(secondary_button(ui, "稍後")).clicked();
-                    go = ui.add(primary_button(ui, if release.asset.is_some() { "立即更新" } else { "開啟下載頁面" })).clicked();
+                    later = ui.add(secondary_button(ui, L!("稍後", "Later"))).clicked();
+                    go = ui.add(primary_button(ui, if release.asset.is_some() { L!("立即更新", "Update now") } else { L!("開啟下載頁面", "Open download page") })).clicked();
                 });
                 later |= ui.input(|i| i.key_pressed(Key::Escape));
                 if go {
@@ -2332,7 +2391,7 @@ impl App {
             Dialog::Hashes { rows, expected } => {
                 let p = pal(ui);
                 ui.set_width(640.0);
-                dialog_title(ui, icon::FINGERPRINT, "雜湊值");
+                dialog_title(ui, icon::FINGERPRINT, L!("雜湊值", "Hashes"));
                 egui::ScrollArea::vertical().max_height(360.0).auto_shrink([false, true]).show(ui, |ui| {
                     for (name, h) in rows.iter() {
                         ui.horizontal(|ui| {
@@ -2343,7 +2402,7 @@ impl App {
                             for (algo, value) in h.all() {
                                 ui.label(RichText::new(algo).color(p.text2));
                                 ui.add(egui::Label::new(RichText::new(value).monospace().color(p.text)).selectable(true));
-                                if ui.small_button(icon::COPY).on_hover_text("複製").clicked() {
+                                if ui.small_button(icon::COPY).on_hover_text(L!("複製", "Copy")).clicked() {
                                     ui.ctx().copy_text(value.to_string());
                                 }
                                 ui.end_row();
@@ -2353,13 +2412,13 @@ impl App {
                     }
                 });
                 ui.add_space(4.0);
-                ui.label(RichText::new("比對：貼上網站提供的雜湊值").color(p.text2));
+                ui.label(RichText::new(L!("比對：貼上網站提供的雜湊值", "Compare: paste the hash published by the website")).color(p.text2));
                 ui.add(egui::TextEdit::singleline(expected).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace));
                 if !expected.trim().is_empty() {
                     let hit = rows.iter().find_map(|(name, h)| h.matches(expected).map(|algo| (name, algo)));
                     match hit {
-                        Some((name, algo)) => ui.label(RichText::new(format!("{}  符合「{name}」的 {algo}", icon::CHECK_CIRCLE)).color(p.success)),
-                        None => ui.label(RichText::new(format!("{}  不符合任何一個檔案的雜湊值", icon::X_CIRCLE)).color(p.danger)),
+                        Some((name, algo)) => ui.label(RichText::new(F!("{}  符合「{name}」的 {algo}", "{}  Matches the {algo} of \"{name}\"", icon::CHECK_CIRCLE)).color(p.success)),
+                        None => ui.label(RichText::new(F!("{}  不符合任何一個檔案的雜湊值", "{}  Doesn't match any file's hash", icon::X_CIRCLE)).color(p.danger)),
                     };
                 }
                 let (ok, cancel) = dialog_buttons_single(ui);
@@ -2372,15 +2431,15 @@ impl App {
                 let (name, archive) = self.watched.get(i).map(|w| (file_name(&w.file), file_name(&w.archive))).unwrap_or_default();
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(icon::FLOPPY_DISK).size(22.0).color(p.accent));
-                    ui.label(RichText::new("要把修改存回壓縮檔嗎？").size(16.0).strong().color(p.text));
+                    ui.label(RichText::new(L!("要把修改存回壓縮檔嗎？", "Save changes back to the archive?")).size(16.0).strong().color(p.text));
                 });
                 ui.add_space(8.0);
-                ui.add(egui::Label::new(RichText::new(format!("「{name}」已在其他程式中修改並儲存。\n要把新版本更新到「{archive}」嗎？")).color(p.text)).wrap());
+                ui.add(egui::Label::new(RichText::new(F!("「{name}」已在其他程式中修改並儲存。\n要把新版本更新到「{archive}」嗎？", "\"{name}\" was changed and saved in another program.\nUpdate \"{archive}\" with the new version?")).color(p.text)).wrap());
                 ui.add_space(6.0);
                 let (mut save, mut skip) = (false, false);
                 ui.allocate_ui_with_layout(vec2(ui.available_width(), 32.0), Layout::right_to_left(Align::Center), |ui| {
-                    skip = ui.add(secondary_button(ui, "不要")).clicked();
-                    save = ui.add(primary_button(ui, "存回壓縮檔")).clicked();
+                    skip = ui.add(secondary_button(ui, L!("不要", "Don't save"))).clicked();
+                    save = ui.add(primary_button(ui, L!("存回壓縮檔", "Save to archive"))).clicked();
                 });
                 skip |= ui.input(|i| i.key_pressed(Key::Escape));
                 if save || skip {
@@ -2395,10 +2454,10 @@ impl App {
                 ui.set_width(400.0);
                 ui.horizontal(|ui| {
                     ui.add(egui::Spinner::new().size(20.0).color(p.accent));
-                    ui.label(RichText::new("正在更新 Zipo…").size(16.0).strong().color(p.text));
+                    ui.label(RichText::new(L!("正在更新 Zipo…", "Updating Zipo…")).size(16.0).strong().color(p.text));
                 });
                 ui.add_space(8.0);
-                ui.label(RichText::new("正在下載並驗證更新檔，完成後會自動重新啟動。").color(p.text2));
+                ui.label(RichText::new(L!("正在下載並驗證更新檔，完成後會自動重新啟動。", "Downloading and verifying the update; Zipo will restart when it's done.")).color(p.text2));
                 // 更新完成或失敗時由 poll_update 換成其他對話框
                 keep = true;
             }
@@ -2432,17 +2491,17 @@ impl App {
                 // 與 7-Zip 的「確認取代檔案」相同的選項
                 egui::Frame::new().fill(p.sunken).corner_radius(6).inner_margin(10).show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    ui.label(RichText::new("目的資料夾已經有同名的檔案：").strong().color(p.text));
+                    ui.label(RichText::new(L!("目的資料夾已經有同名的檔案：", "The destination already has a file with this name:")).strong().color(p.text));
                     ui.add(egui::Label::new(RichText::new(q.display().to_string()).size(12.5).color(p.text2)).wrap());
                     if let Ok(m) = std::fs::metadata(q) {
-                        let info = format!("現有檔案：{}，{}", human(m.len()), format_time(m.modified().ok()));
+                        let info = F!("現有檔案：{}，{}", "Existing file: {}, {}", human(m.len()), format_time(m.modified().ok()));
                         ui.label(RichText::new(info).size(12.5).color(p.text2));
                     }
                     ui.add_space(4.0);
-                    ui.label(RichText::new("要用壓縮檔中的檔案取代嗎？").color(p.text));
+                    ui.label(RichText::new(L!("要用壓縮檔中的檔案取代嗎？", "Replace it with the file from the archive?")).color(p.text));
                     ui.horizontal_wrapped(|ui| {
                         use ziptool_core::OverwriteAnswer as A;
-                        let choices = [("取代", A::Yes), ("全部取代", A::YesAll), ("略過", A::No), ("全部略過", A::NoAll), ("全部自動重新命名", A::RenameAll)];
+                        let choices = [(L!("取代", "Replace"), A::Yes), (L!("全部取代", "Replace all"), A::YesAll), (L!("略過", "Skip"), A::No), (L!("全部略過", "Skip all"), A::NoAll), (L!("全部自動重新命名", "Rename all"), A::RenameAll)];
                         for (label, a) in choices {
                             if ui.add(secondary_button(ui, label)).clicked() {
                                 answer = Some(a);
@@ -2455,23 +2514,23 @@ impl App {
             egui::Grid::new("prog").num_columns(4).spacing([14.0, 4.0]).show(ui, |ui| {
                 let k = |ui: &mut egui::Ui, t: &str| ui.label(RichText::new(t).size(12.5).color(p.text2));
                 let v = |ui: &mut egui::Ui, t: String| ui.label(RichText::new(t).size(12.5).color(p.text));
-                k(ui, "已經過");
+                k(ui, L!("已經過", "Elapsed"));
                 v(ui, format_duration(s.elapsed));
-                k(ui, "進度");
+                k(ui, L!("進度", "Progress"));
                 v(ui, format!("{:.0}%", frac * 100.0));
                 ui.end_row();
-                k(ui, "剩餘時間");
+                k(ui, L!("剩餘時間", "Remaining"));
                 v(ui, s.remaining.map(format_duration).unwrap_or_else(|| "--:--:--".into()));
-                k(ui, "已處理");
+                k(ui, L!("已處理", "Processed"));
                 v(ui, format!("{} / {}", human(s.done), human(s.total)));
                 ui.end_row();
-                k(ui, "速度");
+                k(ui, L!("速度", "Speed"));
                 v(ui, format!("{}/s", human(s.speed as u64)));
                 ui.end_row();
             });
             ui.add_space(6.0);
             ui.allocate_ui_with_layout(vec2(ui.available_width(), 32.0), Layout::right_to_left(Align::Center), |ui| {
-                let label = if s.cancelling { "正在取消…" } else { "取消" };
+                let label = if s.cancelling { L!("正在取消…", "Cancelling…") } else { L!("取消", "Cancel") };
                 cancel = ui.add_enabled(!s.cancelling, secondary_button(ui, label)).clicked();
             });
         });
@@ -2520,7 +2579,7 @@ fn dialog_buttons_single(ui: &mut egui::Ui) -> (bool, bool) {
     let mut ok = false;
     ui.add_space(6.0);
     ui.allocate_ui_with_layout(vec2(ui.available_width(), 32.0), Layout::right_to_left(Align::Center), |ui| {
-        ok = ui.add(primary_button(ui, "確定")).clicked();
+        ok = ui.add(primary_button(ui, L!("確定", "OK"))).clicked();
     });
     let keys = ui.input(|i| i.key_pressed(Key::Enter) || i.key_pressed(Key::Escape));
     (ok, keys)
@@ -2546,17 +2605,22 @@ fn preview_inside(archive: &Path, entry: &str, strip: &str, password: Option<Str
         Ok(r) if r.issues.is_empty() => {
             let rel = entry.strip_prefix(&format!("{strip}/")).unwrap_or(entry);
             let file = dir.join(rel);
-            if file.is_file() { preview::load(&file) } else { preview::Content::Unavailable("無法讀取這個項目".into()) }
+            if file.is_file() { preview::load(&file) } else { preview::Content::Unavailable(L!("無法讀取這個項目", "Cannot read this item").into()) }
         }
         Ok(r) => preview::Content::Unavailable(r.issues.first().map(|i| i.reason.clone()).unwrap_or_default()),
-        Err(Error::PasswordRequired | Error::WrongPassword) => preview::Content::Unavailable("需要密碼才能預覽".into()),
+        Err(Error::PasswordRequired | Error::WrongPassword) => preview::Content::Unavailable(L!("需要密碼才能預覽", "A password is required to preview").into()),
         Err(e) => preview::Content::Unavailable(e.to_string()),
     };
     let _ = std::fs::remove_dir_all(&dir);
     content
 }
 
-const NESTED_READ_ONLY: &str = "這是壓縮檔內的壓縮檔（暫存的副本），只能瀏覽、解壓縮，無法直接修改。若要修改，請先把它解壓縮出來。";
+fn nested_read_only() -> &'static str {
+    L!(
+        "這是壓縮檔內的壓縮檔（暫存的副本），只能瀏覽、解壓縮，無法直接修改。若要修改，請先把它解壓縮出來。",
+        "This is an archive inside an archive (a temporary copy); it can be browsed and extracted but not modified. To change it, extract it first."
+    )
+}
 
 /// 拖曳時直接解壓縮的大小上限；更大時改在背景解壓縮（顯示進度），完成後再拖曳一次
 const DRAG_OUT_MAX: u64 = 256 << 20;
@@ -4091,10 +4155,10 @@ mod nested_tests {
         assert!(!st.delete && !st.compress && st.extract);
         app.sel = [0].into();
         app.cmd_delete();
-        assert!(matches!(&app.dialog, Some(Dialog::Notice { message, .. }) if message == NESTED_READ_ONLY));
+        assert!(matches!(&app.dialog, Some(Dialog::Notice { message, .. }) if message == nested_read_only()));
         app.dialog = None;
         app.confirm_add_into_archive(vec![root.join("outer.zip")]);
-        assert!(matches!(&app.dialog, Some(Dialog::Notice { message, .. }) if message == NESTED_READ_ONLY));
+        assert!(matches!(&app.dialog, Some(Dialog::Notice { message, .. }) if message == nested_read_only()));
         app.dialog = None;
         app.cmd_hash();
         wait(&mut app, &ctx);
@@ -4133,5 +4197,43 @@ mod read_only_tests {
         // 一般的壓縮檔可以修改
         app.loc = Location::Archive { path: root.join("x.zip"), inner: String::new() };
         assert!(app.read_only_reason().is_none());
+    }
+}
+
+#[cfg(test)]
+mod english_tests {
+    use super::*;
+    use ziptool_core::i18n::with_language;
+
+    fn has_chinese(s: &str) -> bool {
+        s.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c) || ('\u{3000}'..='\u{303f}').contains(&c) || ('\u{ff00}'..='\u{ffef}').contains(&c))
+    }
+
+    /// 英文介面：訊息、對話框文字與核心程式庫的錯誤都不含中文
+    #[test]
+    fn english_mode_has_no_chinese() {
+        with_language(true, || {
+            let t = tempfile::tempdir().unwrap();
+            let mut app = App::new(Some(real_path(t.path())));
+            app.cmd_delete();
+            let Some(Dialog::Notice { title, message, .. }) = &app.dialog else { panic!() };
+            assert!(!has_chinese(title) && !has_chinese(message), "{title} {message}");
+            assert_eq!(Location::Computer.display(), "Computer");
+            for e in [
+                ziptool_core::Error::PasswordRequired,
+                ziptool_core::Error::WrongPassword,
+                ziptool_core::Error::Cancelled,
+                ziptool_core::Error::NotEnoughSpace { need: 10, available: 1 },
+                ziptool_core::Error::PossibleBomb { size: 1 << 31, packed: 1 },
+                ziptool_core::Error::SevenZ("x".into()),
+            ] {
+                assert!(!has_chinese(&e.to_string()), "{e}");
+            }
+            let bad = ziptool_core::list(&t.path().join("沒有.zip"), None).unwrap_err().to_string();
+            assert!(!bad.contains("找不到"), "{bad}");
+            assert_eq!(dialogs::LEVELS.map(|l| ziptool_core::i18n::pick(l.1, l.2))[3], "Normal");
+        });
+        // 離開後回到中文
+        assert_eq!(Location::Computer.display(), "電腦");
     }
 }

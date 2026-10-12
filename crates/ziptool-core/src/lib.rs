@@ -3,6 +3,7 @@
 
 mod format;
 mod hash;
+pub mod i18n;
 mod iso;
 mod progress;
 mod sevenz;
@@ -21,28 +22,69 @@ pub use progress::{NoProgress, OverwriteAnswer, Progress};
 pub use volume::{is_first_volume, parse_size as parse_volume_size};
 pub use util::{describe, format_size, local_time, set_zip_codepage, zip_codepage};
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum Error {
-    #[error("{}", describe(.0))]
-    Io(#[from] std::io::Error),
-    #[error("{}", zip_message(.0))]
-    Zip(#[from] zip::result::ZipError),
-    #[error("7z 錯誤：{0}")]
+    Io(std::io::Error),
+    Zip(zip::result::ZipError),
     SevenZ(String),
-    #[error("無法辨識的壓縮格式：{0}")]
     UnknownFormat(String),
-    #[error("{0}")]
     Unsupported(String),
-    #[error("此壓縮檔需要密碼")]
     PasswordRequired,
-    #[error("密碼錯誤")]
     WrongPassword,
-    #[error("磁碟空間不足：需要 {}，目前可用 {}", format_size(*.need), format_size(*.available))]
     NotEnoughSpace { need: u64, available: u64 },
-    #[error("解壓縮後約 {}，是壓縮檔的 {} 倍，可能是惡意的「壓縮炸彈」", format_size(*.size), .size / (*.packed).max(1))]
     PossibleBomb { size: u64, packed: u64 },
-    #[error("已取消")]
     Cancelled,
+}
+
+// 錯誤訊息依介面語言顯示，所以手動實作（不使用固定文字的 #[error]）
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let text = match self {
+            Error::Io(e) => describe(e),
+            Error::Zip(e) => zip_message(e),
+            Error::SevenZ(m) => F!("7z 錯誤：{m}", "7z error: {m}"),
+            Error::UnknownFormat(m) => F!("無法辨識的壓縮格式：{m}", "Unrecognized archive format: {m}"),
+            Error::Unsupported(m) => m.clone(),
+            Error::PasswordRequired => L!("此壓縮檔需要密碼", "This archive requires a password").to_string(),
+            Error::WrongPassword => L!("密碼錯誤", "Wrong password").to_string(),
+            Error::NotEnoughSpace { need, available } => F!(
+                "磁碟空間不足：需要 {}，目前可用 {}",
+                "Not enough disk space: {} needed, {} available",
+                format_size(*need),
+                format_size(*available)
+            ),
+            Error::PossibleBomb { size, packed } => F!(
+                "解壓縮後約 {}，是壓縮檔的 {} 倍，可能是惡意的「壓縮炸彈」",
+                "Extracts to about {}, {} times the archive size; it may be a malicious \"zip bomb\"",
+                format_size(*size),
+                size / (*packed).max(1)
+            ),
+            Error::Cancelled => L!("已取消", "Cancelled").to_string(),
+        };
+        f.write_str(&text)
+    }
+}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Error::Io(e) => Some(e),
+            Error::Zip(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for Error {
+    fn from(e: std::io::Error) -> Self {
+        Error::Io(e)
+    }
+}
+
+impl From<zip::result::ZipError> for Error {
+    fn from(e: zip::result::ZipError) -> Self {
+        Error::Zip(e)
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -51,11 +93,11 @@ fn zip_message(e: &zip::result::ZipError) -> String {
     use zip::result::ZipError::*;
     match e {
         Io(e) => describe(e),
-        InvalidArchive(_) => "不是有效的 ZIP 檔，或檔案已損壞".into(),
-        UnsupportedArchive(m) => format!("不支援的 ZIP 功能（{m}）"),
-        FileNotFound => "壓縮檔中找不到指定的項目".into(),
-        InvalidPassword => "密碼錯誤".into(),
-        other => format!("ZIP 錯誤：{other}"),
+        InvalidArchive(_) => L!("不是有效的 ZIP 檔，或檔案已損壞", "Not a valid ZIP file, or the file is damaged").into(),
+        UnsupportedArchive(m) => F!("不支援的 ZIP 功能（{m}）", "Unsupported ZIP feature ({m})"),
+        FileNotFound => L!("壓縮檔中找不到指定的項目", "The specified item was not found in the archive").into(),
+        InvalidPassword => L!("密碼錯誤", "Wrong password").into(),
+        other => F!("ZIP 錯誤：{other}", "ZIP error: {other}"),
     }
 }
 
@@ -101,7 +143,7 @@ pub struct ExtractOptions {
 
 /// 除錯輸出不顯示密碼本身，避免被記錄到日誌或錯誤報告中
 fn redacted(pw: &Option<String>) -> &'static str {
-    if pw.is_some() { "Some(<已隱藏>)" } else { "None" }
+    if pw.is_some() { L!("Some(<已隱藏>)", "Some(<hidden>)") } else { "None" }
 }
 
 impl std::fmt::Debug for CompressOptions {
@@ -183,21 +225,21 @@ pub fn compress(
     if let Some(l) = opts.level
         && l > 9
     {
-        return Err(Error::Unsupported(format!("壓縮等級須為 0–9，收到 {l}")));
+        return Err(Error::Unsupported(F!("壓縮等級須為 0–9，收到 {l}", "Compression level must be 0–9, got {l}")));
     }
     if format.is_read_only() {
-        return Err(Error::Unsupported(format!("{} 只能讀取，無法建立", format.name())));
+        return Err(Error::Unsupported(F!("{} 只能讀取，無法建立", "{} is read-only and cannot be created", format.name())));
     }
     if opts.password.is_some() && !format.supports_password() {
-        return Err(Error::Unsupported(format!("{} 格式不支援密碼", format.name())));
+        return Err(Error::Unsupported(F!("{} 格式不支援密碼", "The {} format does not support passwords", format.name())));
     }
     if opts.encrypt_names && (format != Format::SevenZ || opts.password.is_none()) {
-        return Err(Error::Unsupported("加密檔名只適用於有設定密碼的 7z".into()));
+        return Err(Error::Unsupported(L!("加密檔名只適用於有設定密碼的 7z", "Encrypting file names only applies to 7z archives with a password").into()));
     }
     let items = util::collect(inputs)?;
     if format.is_single() && (items.len() != 1 || items[0].is_dir) {
-        return Err(Error::Unsupported(format!(
-            "{} 只能壓縮單一檔案；多個檔案或資料夾請用 7z、zip 或 tar.{}",
+        return Err(Error::Unsupported(F!(
+            "{} 只能壓縮單一檔案；多個檔案或資料夾請用 7z、zip 或 tar.{}", "{} can only compress a single file; use 7z, zip or tar.{} for multiple files or folders",
             format.name(),
             format.name()
         )));
@@ -235,17 +277,17 @@ pub fn update(
     progress: &dyn Progress,
 ) -> Result<()> {
     if volume::is_first_volume(archive) {
-        return Err(Error::Unsupported("分割的壓縮檔無法直接修改；請先解壓縮，再重新壓縮".into()));
+        return Err(Error::Unsupported(L!("分割的壓縮檔無法直接修改；請先解壓縮，再重新壓縮", "Split archives cannot be modified directly; extract and compress again").into()));
     }
     let format = Format::detect(archive)?;
     if format.is_read_only() {
-        return Err(Error::Unsupported(format!("{} 只能讀取，無法加入或刪除項目", format.name())));
+        return Err(Error::Unsupported(F!("{} 只能讀取，無法加入或刪除項目", "{} is read-only; items cannot be added or deleted", format.name())));
     }
     if format.is_single() {
-        return Err(Error::Unsupported(format!("{} 只能包含單一檔案，無法加入或刪除項目", format.name())));
+        return Err(Error::Unsupported(F!("{} 只能包含單一檔案，無法加入或刪除項目", "{} can contain only a single file; items cannot be added or deleted", format.name())));
     }
     if opts.password.is_some() && !format.supports_password() {
-        return Err(Error::Unsupported(format!("{} 格式不支援密碼", format.name())));
+        return Err(Error::Unsupported(F!("{} 格式不支援密碼", "The {} format does not support passwords", format.name())));
     }
     let into = util::normalize_name(into);
     let mut items = util::collect(add)?;
@@ -277,7 +319,7 @@ pub fn update(
             let x = ExtractOptions { password: opts.password.clone(), ..Default::default() };
             let report = extract(archive, &tmp, &x, progress)?;
             if let Some(i) = report.issues.first() {
-                return Err(Error::Unsupported(format!("無法完整讀出原有項目 {}：{}", i.name, i.reason)));
+                return Err(Error::Unsupported(F!("無法完整讀出原有項目 {}：{}", "Cannot fully read the existing item {}: {}", i.name, i.reason)));
             }
             let mut all = util::collect_tree(&tmp, drop)?;
             // 原有項目必須全部原樣讀出。Windows 上無法保存的名稱（只差大小寫、含 `:` 等字元、CON 等保留名稱）
@@ -288,8 +330,8 @@ pub fn update(
                 .map(|e| util::normalize_name(&e.name))
                 .find(|n| !n.is_empty() && !drop(n) && !kept.contains(n.as_str()))
             {
-                return Err(Error::Unsupported(format!(
-                    "壓縮檔中的「{lost}」無法在這台電腦上原樣保存（例如名稱只差大小寫、含有不允許的字元或是保留名稱），為避免遺失資料，無法加入或刪除項目"
+                return Err(Error::Unsupported(F!(
+                    "壓縮檔中的「{lost}」無法在這台電腦上原樣保存（例如名稱只差大小寫、含有不允許的字元或是保留名稱），為避免遺失資料，無法加入或刪除項目", "\"{lost}\" in the archive cannot be stored as-is on this computer (for example, names differing only in case, disallowed characters or reserved names); to avoid losing data, items cannot be added or deleted"
                 )));
             }
             all.extend(items.iter().map(|i| util::Item { path: i.path.clone(), name: i.name.clone(), ..*i }));

@@ -1,3 +1,4 @@
+use crate::{F, L};
 use std::cell::{Cell, RefCell};
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -41,7 +42,7 @@ pub(crate) fn collect(inputs: &[PathBuf]) -> Result<Vec<Item>> {
             let name = input
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
-                .ok_or_else(|| Error::Unsupported(format!("無效的輸入路徑：{}", input.display())))?;
+                .ok_or_else(|| Error::Unsupported(F!("無效的輸入路徑：{}", "Invalid input path: {}", input.display())))?;
             items.push(Item {
                 path: input.clone(),
                 name,
@@ -185,17 +186,17 @@ pub fn format_size(n: u64) -> String {
 pub fn describe(e: &io::Error) -> String {
     use io::ErrorKind::*;
     if e.raw_os_error() == Some(206) {
-        return "路徑太長".into();
+        return L!("路徑太長", "The path is too long").into();
     }
     match e.kind() {
-        PermissionDenied => "權限不足（檔案可能被其他程式使用中，或為唯讀）".into(),
-        NotFound => "找不到檔案或路徑".into(),
-        InvalidFilename => "檔名無效或路徑太長".into(),
-        StorageFull => "磁碟空間不足".into(),
-        IsADirectory => "已有同名的資料夾".into(),
-        AlreadyExists => "檔案已存在".into(),
-        InvalidData => format!("壓縮資料損壞或格式錯誤（{e}）"),
-        UnexpectedEof => "檔案不完整，可能下載或複製時中斷".into(),
+        PermissionDenied => L!("權限不足（檔案可能被其他程式使用中，或為唯讀）", "Access denied (the file may be in use by another program, or read-only)").into(),
+        NotFound => L!("找不到檔案或路徑", "File or path not found").into(),
+        InvalidFilename => L!("檔名無效或路徑太長", "Invalid file name or path too long").into(),
+        StorageFull => L!("磁碟空間不足", "Not enough disk space").into(),
+        IsADirectory => L!("已有同名的資料夾", "A folder with the same name already exists").into(),
+        AlreadyExists => L!("檔案已存在", "The file already exists").into(),
+        InvalidData => F!("壓縮資料損壞或格式錯誤（{e}）", "Compressed data is damaged or invalid ({e})"),
+        UnexpectedEof => L!("檔案不完整，可能下載或複製時中斷", "The file is incomplete; the download or copy may have been interrupted").into(),
         _ => e.to_string(),
     }
 }
@@ -284,7 +285,7 @@ impl<'a> Planner<'a> {
         }
         let out = safe_join(self.dest, rel);
         if out.is_none() {
-            self.issue(name, "路徑含有「..」，可能試圖寫到目標資料夾之外，已略過");
+            self.issue(name, L!("路徑含有「..」，可能試圖寫到目標資料夾之外，已略過", "The path contains \"..\" and might write outside the destination folder; skipped"));
         }
         out
     }
@@ -293,7 +294,7 @@ impl<'a> Planner<'a> {
     fn prepare_dir(&self, dir: &Path) -> std::result::Result<(), String> {
         for anc in dir.ancestors().take_while(|a| a.starts_with(self.dest) && *a != self.dest) {
             if std::fs::symlink_metadata(anc).is_ok_and(|m| m.file_type().is_symlink()) {
-                return Err("路徑經過符號連結，可能被導向目標資料夾之外，已略過".into());
+                return Err(L!("路徑經過符號連結，可能被導向目標資料夾之外，已略過", "The path goes through a symbolic link and might be redirected outside the destination folder; skipped").into());
             }
         }
         std::fs::create_dir_all(dir).map_err(|e| describe(&e))
@@ -315,7 +316,7 @@ impl<'a> Planner<'a> {
         }
         let Ok(meta) = std::fs::symlink_metadata(path) else { return Ok(Some(path.to_path_buf())) };
         if meta.is_dir() {
-            self.issue(name, "已有同名的資料夾，已略過");
+            self.issue(name, L!("已有同名的資料夾，已略過", "A folder with the same name already exists; skipped"));
             return Ok(None);
         }
         let mode = match self.mode.get() {

@@ -8,6 +8,7 @@
 
 #![cfg_attr(not(windows), allow(dead_code))]
 
+use ziptool_core::L;
 use std::path::Path;
 
 /// 介面語言；資源參照會先找這個語言的 .mui 檔
@@ -216,6 +217,10 @@ fn resolve_resource(_reference: &str) -> Option<String> {
 /// 資料夾的顯示名稱；`attributes` 為 Windows 檔案屬性（其他平台傳 0）。
 /// 先看資料夾裡的 desktop.ini，沒有時再看是不是 Windows 的已知資料夾（文件、下載、桌面…）。
 pub fn folder_display_name(dir: &Path, attributes: u32) -> Option<String> {
+    // 英文介面：顯示實際的資料夾名稱（例如 Downloads）
+    if ziptool_core::i18n::english() {
+        return None;
+    }
     const READONLY: u32 = 0x1;
     const SYSTEM: u32 = 0x4;
     if attributes & (READONLY | SYSTEM) != 0
@@ -285,7 +290,7 @@ pub fn drive_display_name(root: &Path) -> String {
     let label = win::volume_label(root).filter(|l| !l.is_empty());
     #[cfg(not(windows))]
     let label: Option<String> = None;
-    format!("{} ({letter})", label.unwrap_or_else(|| "本機磁碟".into()))
+    format!("{} ({letter})", label.unwrap_or_else(|| L!("本機磁碟", "Local Disk").into()))
 }
 
 /// 路徑本身的顯示名稱（給網址列使用）：資料夾有在地化名稱就用它，否則用原本的名稱。

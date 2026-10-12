@@ -3,6 +3,7 @@
 //! 連線使用系統內建的 curl（Windows 10 起內附，TLS 與 Proxy 設定由 Windows 處理），不另外加入網路函式庫。
 //! 執行中的 exe 無法覆寫但可以改名：舊檔改名為 `*.old`、新檔放回原位，下次啟動時再刪除舊檔。
 
+use ziptool_core::{F, L};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -73,13 +74,13 @@ fn asset_name(version: &str) -> Option<String> {
 
 /// 解讀 GitHub API 的回應
 pub fn parse_release(json: &[u8]) -> Result<Release, String> {
-    let r: ApiRelease = serde_json::from_slice(json).map_err(|e| format!("無法解讀更新資訊：{e}"))?;
+    let r: ApiRelease = serde_json::from_slice(json).map_err(|e| F!("無法解讀更新資訊：{e}", "Cannot read the update information: {e}"))?;
     let version = r.tag_name.trim_start_matches('v').to_string();
     if parse_version(&version).is_none() {
-        return Err(format!("版本號碼格式不正確：{}", r.tag_name));
+        return Err(F!("版本號碼格式不正確：{}", "Invalid version number: {}", r.tag_name));
     }
     if !r.html_url.starts_with(PAGE_PREFIX) {
-        return Err("更新資訊中的網址不正確".into());
+        return Err(L!("更新資訊中的網址不正確", "The update information contains an invalid address").into());
     }
     let want = asset_name(&version);
     let asset = r.assets.into_iter().find(|a| Some(&a.name) == want.as_ref()).and_then(|a| {
@@ -116,10 +117,10 @@ fn curl(url: &str, out: Option<&Path>) -> Result<Vec<u8>, String> {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    let o = cmd.output().map_err(|e| format!("無法執行 curl：{e}"))?;
+    let o = cmd.output().map_err(|e| F!("無法執行 curl：{e}", "Cannot run curl: {e}"))?;
     if !o.status.success() {
         let why = String::from_utf8_lossy(&o.stderr).trim().to_string();
-        return Err(format!("無法連線到 GitHub：{why}"));
+        return Err(F!("無法連線到 GitHub：{why}", "Cannot connect to GitHub: {why}"));
     }
     Ok(o.stdout)
 }
@@ -145,11 +146,11 @@ fn sha256_file(path: &Path) -> std::io::Result<String> {
 
 /// 下載、驗證並安裝更新；成功時回傳要重新啟動的執行檔
 pub fn download_and_install(release: &Release, current_exe: &Path) -> Result<PathBuf, String> {
-    let asset = release.asset.as_ref().ok_or("這個版本沒有適用於這台電腦的更新檔，請到下載頁面手動更新")?;
+    let asset = release.asset.as_ref().ok_or(L!("這個版本沒有適用於這台電腦的更新檔，請到下載頁面手動更新", "This version has no update package for this computer; please update manually from the download page"))?;
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     let work = std::env::temp_dir().join("Zipo").join(format!("update-{}-{stamp}", std::process::id()));
     let r = (|| {
-        std::fs::create_dir_all(&work).map_err(|e| format!("無法建立暫存資料夾：{e}"))?;
+        std::fs::create_dir_all(&work).map_err(|e| F!("無法建立暫存資料夾：{e}", "Cannot create a temporary folder: {e}"))?;
         let zip = work.join(&asset.name);
         curl(&asset.url, Some(&zip))?;
         install_from_zip(&zip, asset, &work.join("x"), current_exe)
@@ -162,15 +163,15 @@ pub fn download_and_install(release: &Release, current_exe: &Path) -> Result<Pat
 fn install_from_zip(zip: &Path, asset: &Asset, unpack: &Path, current_exe: &Path) -> Result<PathBuf, String> {
     let size = std::fs::metadata(zip).map(|m| m.len()).unwrap_or(0);
     if size != asset.size {
-        return Err(format!("下載的檔案大小不符（{size}，應為 {}）", asset.size));
+        return Err(F!("下載的檔案大小不符（{size}，應為 {}）", "The downloaded file has the wrong size ({size}, expected {})", asset.size));
     }
-    let digest = sha256_file(zip).map_err(|e| format!("無法讀取下載的檔案：{e}"))?;
+    let digest = sha256_file(zip).map_err(|e| F!("無法讀取下載的檔案：{e}", "Cannot read the downloaded file: {e}"))?;
     if digest != asset.sha256 {
-        return Err("下載的檔案驗證失敗（SHA-256 不符），可能已損毀或遭竄改，已取消更新".into());
+        return Err(L!("下載的檔案驗證失敗（SHA-256 不符），可能已損毀或遭竄改，已取消更新", "The downloaded file failed verification (SHA-256 mismatch); it may be damaged or tampered with. The update was cancelled").into());
     }
-    ziptool_core::extract(zip, unpack, &Default::default(), &ziptool_core::NoProgress).map_err(|e| format!("無法解開更新檔：{e}"))?;
-    let gui = find_file(unpack, "zipo-gui.exe").ok_or("更新檔中找不到 zipo-gui.exe")?;
-    let dir = current_exe.parent().ok_or("找不到程式所在的資料夾")?;
+    ziptool_core::extract(zip, unpack, &Default::default(), &ziptool_core::NoProgress).map_err(|e| F!("無法解開更新檔：{e}", "Cannot unpack the update: {e}"))?;
+    let gui = find_file(unpack, "zipo-gui.exe").ok_or(L!("更新檔中找不到 zipo-gui.exe", "zipo-gui.exe was not found in the update"))?;
+    let dir = current_exe.parent().ok_or(L!("找不到程式所在的資料夾", "Cannot find the program's folder"))?;
     replace_file(&gui, current_exe)?;
     // 同一個資料夾中的命令列版本一併更新
     let cli_target = dir.join("zipo.exe");
@@ -209,9 +210,9 @@ fn replace_file(new: &Path, target: &Path) -> Result<(), String> {
     let _ = std::fs::remove_file(&old);
     let denied = |e: std::io::Error| {
         if e.kind() == std::io::ErrorKind::PermissionDenied {
-            format!("沒有權限更新「{}」，請到下載頁面手動更新", target.parent().unwrap_or(target).display())
+            F!("沒有權限更新「{}」，請到下載頁面手動更新", "No permission to update \"{}\"; please update manually from the download page", target.parent().unwrap_or(target).display())
         } else {
-            format!("無法更新「{}」：{e}", target.display())
+            F!("無法更新「{}」：{e}", "Cannot update \"{}\": {e}", target.display())
         }
     };
     std::fs::rename(target, &old).map_err(denied)?;

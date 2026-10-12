@@ -1,5 +1,6 @@
 //! 單檔壓縮格式：gz、bz2、xz、zst。也提供 tar.* 共用的編碼／解碼器。
 
+use crate::L;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::Path;
@@ -134,7 +135,7 @@ fn output_name(archive: &Path, format: Format) -> Result<String> {
     let name = archive
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
-        .ok_or_else(|| Error::Unsupported("無效的檔名".into()))?;
+        .ok_or_else(|| Error::Unsupported(L!("無效的檔名", "Invalid file name").into()))?;
     Ok(match Format::split_extension(&name) {
         Some((stem, f)) if f == format && !stem.is_empty() => stem.to_string(),
         _ => format!("{name}.out"),
