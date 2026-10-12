@@ -251,6 +251,31 @@ pub fn archive_rows(entries: &[Entry], inner: &str) -> Vec<Row> {
     map.into_values().collect()
 }
 
+/// 在壓縮檔的 `inner` 資料夾（含所有子資料夾）中，找出名稱包含 `query` 的項目（不分大小寫）。
+/// 結果的名稱是相對於 `inner` 的路徑（例如 `sub/b.txt`），所以開啟、解壓縮、拖曳都能照常使用。
+pub fn archive_search(entries: &[Entry], inner: &str, query: &str) -> Vec<Row> {
+    let q = query.to_lowercase();
+    let prefix = if inner.is_empty() { String::new() } else { format!("{inner}/") };
+    entries
+        .iter()
+        .filter_map(|e| {
+            let rel = e.name.strip_prefix(&prefix)?;
+            let base = rel.rsplit('/').next().unwrap_or(rel);
+            (!rel.is_empty() && base.to_lowercase().contains(&q)).then(|| Row {
+                name: rel.to_string(),
+                display: rel.to_string(),
+                is_dir: e.is_dir,
+                size: if e.is_dir { None } else { e.size },
+                packed: if e.is_dir { None } else { e.compressed_size },
+                modified: e.modified,
+                encrypted: e.encrypted,
+                is_archive: false,
+                is_drive: false,
+            })
+        })
+        .collect()
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum SortKey {
     Name,
@@ -295,6 +320,19 @@ mod tests {
         let a = archive_rows(&entries, "a");
         let names: Vec<_> = a.iter().map(|r| (r.name.as_str(), r.is_dir, r.size)).collect();
         assert_eq!(names, [("b", true, Some(30)), ("x.txt", false, Some(10))]);
+    }
+
+    #[test]
+    fn search_whole_archive() {
+        let entries = vec![e("a", true, 0), e("a/Report.txt", false, 10), e("a/b/report-2.TXT", false, 30), e("z.txt", false, 5), e("x/q", false, 1)];
+        let names = |rows: Vec<Row>| rows.into_iter().map(|r| (r.name, r.is_dir)).collect::<Vec<_>>();
+        // 從根目錄搜尋：比對檔名（不含路徑），不分大小寫，結果為相對路徑
+        assert_eq!(names(archive_search(&entries, "", "report")), [("a/Report.txt".into(), false), ("a/b/report-2.TXT".into(), false)]);
+        // 在 a 資料夾內搜尋：只找 a 底下，路徑相對於 a
+        assert_eq!(names(archive_search(&entries, "a", ".txt")), [("Report.txt".into(), false), ("b/report-2.TXT".into(), false)]);
+        // 資料夾也找得到；路徑中的字不算
+        assert_eq!(names(archive_search(&entries, "", "a")), [("a".into(), true)]);
+        assert!(archive_search(&entries, "", "nothing").is_empty());
     }
 
     #[test]

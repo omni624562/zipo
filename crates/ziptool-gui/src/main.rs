@@ -659,7 +659,11 @@ impl App {
     fn resort(&mut self) {
         let selected: Vec<String> = self.sel.iter().filter_map(|&i| self.rows.get(i)).map(|r| r.name.clone()).collect();
         let f = self.filter.to_lowercase();
-        self.rows = self.all_rows.iter().filter(|r| f.is_empty() || r.display.to_lowercase().contains(&f) || r.name.to_lowercase().contains(&f)).cloned().collect();
+        self.rows = match (&self.loc, &self.cache) {
+            // 壓縮檔內：搜尋目前資料夾以下的所有層
+            (Location::Archive { path, inner }, Some(c)) if !f.is_empty() && c.path == *path => browser::archive_search(&c.entries, inner, &f),
+            _ => self.all_rows.iter().filter(|r| f.is_empty() || r.display.to_lowercase().contains(&f) || r.name.to_lowercase().contains(&f)).cloned().collect(),
+        };
         browser::sort(&mut self.rows, self.sort_key, self.sort_asc);
         self.sel = self.rows.iter().enumerate().filter(|(_, r)| selected.contains(&r.name)).map(|(i, _)| i).collect();
         self.anchor = self.anchor.filter(|&a| a < self.rows.len());
@@ -1424,7 +1428,7 @@ impl App {
                         let r = ui.add(
                             egui::TextEdit::singleline(&mut self.filter)
                                 .frame(egui::Frame::NONE)
-                                .hint_text(format!("搜尋 {here}"))
+                                .hint_text(if matches!(self.loc, Location::Archive { .. }) { format!("搜尋 {here}（含子資料夾）") } else { format!("搜尋 {here}") })
                                 .desired_width(ui.available_width()),
                         );
                         filter_changed = r.changed();
@@ -3412,6 +3416,40 @@ mod hash_tests {
     }
 
     const ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+    /// 壓縮檔內的搜尋找遍所有層；結果可以直接操作（計算雜湊值、開啟資料夾）
+    #[test]
+    fn search_inside_archive_reaches_all_levels() {
+        let t = tempfile::tempdir().unwrap();
+        let root = real_path(t.path());
+        std::fs::create_dir_all(root.join("src/docs/deep")).unwrap();
+        std::fs::write(root.join("src/docs/deep/abc.txt"), "abc").unwrap();
+        std::fs::write(root.join("src/docs/other.md"), "x").unwrap();
+        let ar = root.join("s.zip");
+        ziptool_core::compress(&[root.join("src/docs")], &ar, Format::Zip, &Default::default(), &ziptool_core::NoProgress).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = App::new(Some(ar.clone()));
+        wait(&mut app, &ctx);
+        assert_eq!(app.rows.len(), 1, "根目錄只有 docs");
+        app.filter = "ABC".into();
+        app.resort();
+        let names: Vec<&str> = app.rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["docs/deep/abc.txt"]);
+        app.sel = [0].into();
+        app.cmd_hash();
+        wait(&mut app, &ctx);
+        // 名稱包含所在路徑，方便辨認是哪一層的檔案
+        assert_eq!(hashes_dialog(&app), [("docs/deep/abc.txt".to_string(), ABC.to_string())]);
+
+        // 搜尋到的資料夾：開啟後進入該資料夾
+        app.dialog = None;
+        app.filter = "deep".into();
+        app.resort();
+        let i = app.rows.iter().position(|r| r.is_dir).unwrap();
+        app.open_row(i);
+        assert_eq!(app.loc, Location::Archive { path: ar.clone(), inner: "docs/deep".into() });
+        assert!(app.filter.is_empty(), "換資料夾後清除搜尋");
+    }
 
     #[test]
     fn hashes_files_on_disk() {
