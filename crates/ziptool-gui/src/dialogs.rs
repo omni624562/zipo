@@ -6,7 +6,7 @@ use eframe::egui::{self, RichText};
 use egui_phosphor::regular as icon;
 use ziptool_core::{CompressOptions, ExtractOptions, Format, Overwrite};
 
-use crate::jobs::Task;
+use crate::jobs::{Task, Then};
 use crate::theme::pal;
 use crate::widgets::*;
 use crate::{file_name, pick_save, pick_folder};
@@ -29,6 +29,9 @@ pub struct AddDialog {
     password2: String,
     show_password: bool,
     encrypt_names: bool,
+    /// 壓縮後將原始檔移到資源回收筒
+    recycle: bool,
+    pub open_folder: bool,
     error: Option<String>,
 }
 
@@ -56,6 +59,8 @@ impl AddDialog {
             password2: String::new(),
             show_password: false,
             encrypt_names: false,
+            recycle: false,
+            open_folder: false,
             error: None,
         }
     }
@@ -101,6 +106,7 @@ impl AddDialog {
                 encrypt_names: self.encrypt_names && password.is_some() && self.format == Format::SevenZ,
                 password,
             },
+            then: Then { recycle: self.recycle, open_folder: self.open_folder },
         })
     }
 
@@ -178,6 +184,10 @@ impl AddDialog {
         let names: Vec<String> = self.inputs.iter().take(3).map(|p| file_name(p)).collect();
         let more = if self.inputs.len() > 3 { format!(" 等 {} 個項目", self.inputs.len()) } else { String::new() };
         ui.label(RichText::new(format!("要加入：{}{more}", names.join("、"))).size(12.5).color(p.text2));
+        ui.add_space(4.0);
+        ui.checkbox(&mut self.recycle, "壓縮後將原始檔移到資源回收筒")
+            .on_hover_text("會先檢查壓縮檔是否完整，確認無誤才移除；可以從資源回收筒還原");
+        ui.checkbox(&mut self.open_folder, "完成後開啟所在資料夾");
         if let Some(e) = &self.error {
             error_text(ui, e);
         }
@@ -229,6 +239,9 @@ pub struct ExtractDialog {
     password: String,
     show_password: bool,
     smart: bool,
+    /// 解壓後將壓縮檔移到資源回收筒（只用於本機的壓縮檔）
+    recycle: bool,
+    pub open_folder: bool,
     error: Option<String>,
 }
 
@@ -247,6 +260,8 @@ impl ExtractDialog {
             password: password.unwrap_or_default(),
             show_password: false,
             smart: true,
+            recycle: false,
+            open_folder: false,
             error: None,
         }
     }
@@ -272,6 +287,11 @@ impl ExtractDialog {
         }
         ui.checkbox(&mut self.smart, "壓縮檔內只有一個資料夾時，不再多包一層同名資料夾")
             .on_hover_text("例如 專案.zip 裡只有「專案」資料夾，就解成 …\\專案\\，而不是 …\\專案\\專案\\");
+        if matches!(self.source, ExtractSource::Files(_)) {
+            ui.checkbox(&mut self.recycle, "解壓後將壓縮檔移到資源回收筒")
+                .on_hover_text("全部項目都順利解出才會移除；可以從資源回收筒還原");
+        }
+        ui.checkbox(&mut self.open_folder, "完成後開啟資料夾");
         ui.add_space(10.0);
 
         ui.columns(2, |cols| {
@@ -319,7 +339,8 @@ impl ExtractDialog {
                     vec![archive.clone()]
                 }
             };
-            return Outcome::Ok(Task::Extract { archives, dest, opts, smart: self.smart && !self.flatten });
+            let then = Then { recycle: self.recycle && matches!(self.source, ExtractSource::Files(_)), open_folder: self.open_folder };
+            return Outcome::Ok(Task::Extract { archives, dest, opts, smart: self.smart && !self.flatten, then });
         }
         Outcome::Pending
     }

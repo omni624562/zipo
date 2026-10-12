@@ -29,7 +29,7 @@ use ziptool_core::{Entry, Error, Format, Issue};
 
 use browser::{Location, Row, SortKey};
 use dialogs::{AddDialog, ExtractDialog, ExtractSource, Outcome, PasswordDialog, PasswordPurpose};
-use jobs::{Job, Task};
+use jobs::{Job, Task, Then};
 use theme::pal;
 use widgets::*;
 
@@ -419,6 +419,8 @@ struct App {
     pending_release: Option<update::Release>,
     /// 要拖曳到程式外的壓縮檔內項目（完整名稱）；畫面處理完後才開始拖曳
     drag_out: Option<Vec<String>>,
+    /// 上次在壓縮／解壓縮對話框勾選的「完成後開啟資料夾」
+    open_after: bool,
     /// 效能診斷（設定 ZIPTOOL_PERF 時啟用）
     #[cfg(debug_assertions)]
     perf: Option<perf::Perf>,
@@ -466,6 +468,7 @@ impl App {
             update_work: None,
             pending_release: None,
             drag_out: None,
+            open_after: false,
             #[cfg(debug_assertions)]
             perf: perf::Perf::from_env(),
             #[cfg(debug_assertions)]
@@ -473,6 +476,7 @@ impl App {
         };
         let get = |k: &str| storage.and_then(|s| s.get_string(k));
         app.auto_update = get("auto_update").as_deref() != Some("0");
+        app.open_after = get("open_after").as_deref() == Some("1");
         app.last_update_check = get("last_update_check").and_then(|v| v.parse().ok()).unwrap_or(0);
         if let Some(k) = get("sort_key") {
             app.sort_key = match k.as_str() {
@@ -510,17 +514,17 @@ impl App {
             StartAction::None | StartAction::Open(_) => {}
             StartAction::Add(paths) => {
                 self.navigate(Location::Dir(parent(&paths[0])));
-                self.dialog = Some(Dialog::Add(AddDialog::new(paths, self.add_format, self.add_level)));
+                self.dialog = Some(Dialog::Add(self.with_open_after_add(AddDialog::new(paths, self.add_format, self.add_level))));
             }
             StartAction::ExtractHere(ar) => {
                 let dir = parent(&ar);
                 self.navigate(Location::Dir(dir.clone()));
                 let opts = ziptool_core::ExtractOptions { overwrite: ziptool_core::Overwrite::Ask, ..Default::default() };
-                self.spawn(Task::Extract { archives: vec![ar], dest: dir, opts, smart: false });
+                self.spawn(Task::Extract { archives: vec![ar], dest: dir, opts, smart: false, then: Then::default() });
             }
             StartAction::ExtractFolder(ar) => {
                 self.navigate(Location::Dir(parent(&ar)));
-                self.dialog = Some(Dialog::Extract(ExtractDialog::new(ExtractSource::Files(vec![ar]), None)));
+                self.dialog = Some(Dialog::Extract(self.with_open_after_extract(ExtractDialog::new(ExtractSource::Files(vec![ar]), None))));
             }
         }
     }
@@ -546,6 +550,7 @@ impl App {
         storage.set_string("add_level", self.add_level.to_string());
         storage.set_string("show_system", if self.show_system { "1" } else { "0" }.into());
         storage.set_string("auto_update", if self.auto_update { "1" } else { "0" }.into());
+        storage.set_string("open_after", if self.open_after { "1" } else { "0" }.into());
         storage.set_string("last_update_check", self.last_update_check.to_string());
         storage.set_string("zip_codepage", ziptool_core::zip_codepage().map(|c| c.to_string()).unwrap_or_default());
     }
@@ -888,7 +893,7 @@ impl App {
         if paths.is_empty() {
             return self.notice("加入", "請先選取要加入壓縮檔的檔案或資料夾。");
         }
-        self.dialog = Some(Dialog::Add(AddDialog::new(paths, self.add_format, self.add_level)));
+        self.dialog = Some(Dialog::Add(self.with_open_after_add(AddDialog::new(paths, self.add_format, self.add_level))));
     }
 
     /// 在壓縮檔內加入檔案（加到目前瀏覽的資料夾）。
@@ -950,7 +955,7 @@ impl App {
             }
         };
         let password = self.cache.as_ref().and_then(|c| c.password.clone());
-        self.dialog = Some(Dialog::Extract(ExtractDialog::new(source, password)));
+        self.dialog = Some(Dialog::Extract(self.with_open_after_extract(ExtractDialog::new(source, password))));
     }
 
     fn cmd_test(&mut self) {
@@ -1043,6 +1048,17 @@ impl App {
         }
     }
 
+    /// 對話框預設勾選上次的「完成後開啟資料夾」
+    fn with_open_after_add(&self, mut d: AddDialog) -> AddDialog {
+        d.open_folder = self.open_after;
+        d
+    }
+
+    fn with_open_after_extract(&self, mut d: ExtractDialog) -> ExtractDialog {
+        d.open_folder = self.open_after;
+        d
+    }
+
     /// 計算選取項目的雜湊值；壓縮檔內的項目先解到暫存資料夾
     fn cmd_hash(&mut self) {
         let rows: Vec<Row> = self.selected_rows().into_iter().filter(|r| !r.is_drive).cloned().collect();
@@ -1109,6 +1125,11 @@ impl App {
                 Ok(out) => {
                     if out.refresh {
                         self.refresh();
+                    }
+                    if out.auto_open
+                        && let Some(d) = &out.open_dir
+                    {
+                        open_path(d);
                     }
                     if !out.hashes.is_empty() {
                         self.dialog = Some(Dialog::Hashes { rows: out.hashes, expected: String::new() });
@@ -1797,7 +1818,7 @@ impl App {
         if dropped.len() == 1 && dropped[0].is_file() && Format::from_file_name(&file_name(&dropped[0])).is_some() {
             self.open_path_arg(dropped[0].clone());
         } else {
-            self.dialog = Some(Dialog::Add(AddDialog::new(dropped, self.add_format, self.add_level)));
+            self.dialog = Some(Dialog::Add(self.with_open_after_add(AddDialog::new(dropped, self.add_format, self.add_level))));
         }
     }
 
@@ -1812,6 +1833,7 @@ impl App {
                 Outcome::Ok(task) => {
                     keep = false;
                     (self.add_format, self.add_level) = d.choice();
+                    self.open_after = d.open_folder;
                     self.spawn(task);
                 }
             },
@@ -1820,6 +1842,7 @@ impl App {
                 Outcome::Cancel => keep = false,
                 Outcome::Ok(task) => {
                     keep = false;
+                    self.open_after = d.open_folder;
                     self.spawn(task);
                 }
             },
@@ -2367,6 +2390,7 @@ impl App {
                     output: out_dir.clone().unwrap_or_default().join("devshot.7z"),
                     format: Format::SevenZ,
                     opts: ziptool_core::CompressOptions { level: Some(level), ..Default::default() },
+                    then: Then::default(),
                 };
                 match d.as_str() {
                     "add" => self.cmd_add(),
@@ -2393,7 +2417,7 @@ impl App {
                             let dest = dialogs::default_dest(path);
                             let overwrite = if d == "progress-ask" { ziptool_core::Overwrite::Ask } else { Default::default() };
                             let opts = ziptool_core::ExtractOptions { overwrite, ..Default::default() };
-                            self.spawn(Task::Extract { archives: vec![path.clone()], dest, opts, smart: true });
+                            self.spawn(Task::Extract { archives: vec![path.clone()], dest, opts, smart: true, then: Then::default() });
                         }
                     }
                     _ => {}
@@ -2568,6 +2592,7 @@ mod job_tests {
             dest: dest.to_path_buf(),
             opts: ExtractOptions { overwrite: Overwrite::Ask, ..Default::default() },
             smart: false,
+            then: Then::default(),
         }
     }
 
@@ -2687,7 +2712,7 @@ mod smart_tests {
         let ar = make(t.path(), "proj.zip", &["proj"]);
         let out = t.path().join("dest");
         std::fs::create_dir_all(&out).unwrap();
-        let task = Task::Extract { archives: vec![ar], dest: out.join("proj"), opts: Default::default(), smart: true };
+        let task = Task::Extract { archives: vec![ar], dest: out.join("proj"), opts: Default::default(), smart: true, then: Then::default() };
         let job = Job::spawn(task);
         while !job.is_finished() {
             std::thread::sleep(Duration::from_millis(10));

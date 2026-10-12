@@ -10,12 +10,21 @@ use ziptool_core::{CompressOptions, Error, ExtractOptions, Format, Issue, Overwr
 
 use crate::human;
 
+/// 壓縮或解壓縮完成後的動作
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+pub struct Then {
+    /// 壓縮：原始檔移到資源回收筒（先測試壓縮檔無誤）；解壓縮：壓縮檔移到資源回收筒（全部項目都解出時）
+    pub recycle: bool,
+    /// 完成後開啟所在資料夾
+    pub open_folder: bool,
+}
+
 #[derive(Clone)]
 pub enum Task {
-    Compress { inputs: Vec<PathBuf>, output: PathBuf, format: Format, opts: CompressOptions },
+    Compress { inputs: Vec<PathBuf>, output: PathBuf, format: Format, opts: CompressOptions, then: Then },
     /// 多個壓縮檔時，每個解到 `dest/<名稱>`；單一壓縮檔直接解到 `dest`。
     /// `smart`：壓縮檔內只有一個最上層資料夾時，不再多包一層同名資料夾。
-    Extract { archives: Vec<PathBuf>, dest: PathBuf, opts: ExtractOptions, smart: bool },
+    Extract { archives: Vec<PathBuf>, dest: PathBuf, opts: ExtractOptions, smart: bool, then: Then },
     Test { archives: Vec<PathBuf>, password: Option<String> },
     /// 更新既有壓縮檔：加入檔案到 `into` 資料夾、刪除 `remove` 中的項目。
     Update { archive: PathBuf, add: Vec<PathBuf>, into: String, remove: Vec<String>, password: Option<String> },
@@ -69,6 +78,8 @@ pub struct Outcome {
     pub issues: Vec<Issue>,
     /// 雜湊值計算的結果（有的話顯示雜湊值對話框）
     pub hashes: Vec<(String, ziptool_core::Hashes)>,
+    /// 完成後自動開啟 `open_dir`
+    pub auto_open: bool,
 }
 
 /// 取得鎖；即使另一個執行緒在持有鎖時 panic，也繼續使用資料而不連鎖 panic。
@@ -246,27 +257,39 @@ fn stage(s: &Shared, i: usize, n: usize, ar: &Path) {
 fn run(task: Task, s: &Shared) -> Result<Outcome, Error> {
     let started = Instant::now();
     match task {
-        Task::Compress { inputs, output, format, opts } => {
+        Task::Compress { inputs, output, format, opts, then } => {
             ziptool_core::compress(&inputs, &output, format, &opts, s)?;
             let size = std::fs::metadata(&output).map(|m| m.len()).unwrap_or(0);
             let total: u64 = s.total.load(Ordering::Relaxed);
             let ratio = if total > 0 { size as f64 * 100.0 / total as f64 } else { 0.0 };
+            let mut message = format!(
+                "{}\n\n原始大小：{}\n壓縮後：{}（{ratio:.0}%）\n耗時：{:.1} 秒",
+                output.display(),
+                human(total),
+                human(size),
+                started.elapsed().as_secs_f32()
+            );
+            if then.recycle {
+                // 先確認壓縮檔完整，才移除原始檔
+                *lock(&s.stage) = "正在檢查壓縮檔".into();
+                message += &match ziptool_core::test(&output, opts.password.as_deref(), &ziptool_core::NoProgress) {
+                    Ok(_) => match send_to_recycle_bin(&inputs) {
+                        Ok(()) => "\n\n原始檔已移到資源回收筒。".to_string(),
+                        Err(e) => format!("\n\n原始檔無法移到資源回收筒：{e}"),
+                    },
+                    Err(e) => format!("\n\n壓縮檔檢查失敗（{e}），原始檔保留不動。"),
+                };
+            }
             Ok(Outcome {
                 title: "壓縮完成".into(),
-                message: format!(
-                    "{}\n\n原始大小：{}\n壓縮後：{}（{ratio:.0}%）\n耗時：{:.1} 秒",
-                    output.display(),
-                    human(total),
-                    human(size),
-                    started.elapsed().as_secs_f32()
-                ),
+                message,
                 open_dir: output.parent().map(Path::to_path_buf),
                 refresh: true,
-                issues: Vec::new(),
+                auto_open: then.open_folder,
                 ..Default::default()
             })
         }
-        Task::Extract { archives, dest, opts, smart } => {
+        Task::Extract { archives, dest, opts, smart, then } => {
             let n = archives.len();
             let (mut files, mut bytes, mut issues) = (0, 0, Vec::new());
             let mut shown = dest.clone();
@@ -285,17 +308,30 @@ fn run(task: Task, s: &Shared) -> Result<Outcome, Error> {
                 issues.extend(r.issues);
             }
             let title = if issues.is_empty() { "解壓縮完成" } else { "解壓縮完成，但有項目被略過" };
+            let mut message = format!(
+                "已解壓縮到：\n{}\n\n檔案：{files} 個（{}）\n耗時：{:.1} 秒",
+                shown.display(),
+                human(bytes),
+                started.elapsed().as_secs_f32()
+            );
+            // 只解出部分項目或有項目被略過時，壓縮檔保留不動
+            if then.recycle {
+                message += &if !issues.is_empty() || opts.selection.is_some() {
+                    "\n\n有項目未解出，壓縮檔保留不動。".to_string()
+                } else {
+                    match send_to_recycle_bin(&archives) {
+                        Ok(()) => "\n\n壓縮檔已移到資源回收筒。".to_string(),
+                        Err(e) => format!("\n\n壓縮檔無法移到資源回收筒：{e}"),
+                    }
+                };
+            }
             Ok(Outcome {
                 title: title.into(),
-                message: format!(
-                    "已解壓縮到：\n{}\n\n檔案：{files} 個（{}）\n耗時：{:.1} 秒",
-                    shown.display(),
-                    human(bytes),
-                    started.elapsed().as_secs_f32()
-                ),
+                message,
                 open_dir: Some(shown),
                 refresh: true,
                 issues,
+                auto_open: then.open_folder,
                 ..Default::default()
             })
         }
@@ -401,5 +437,116 @@ mod open_inside_tests {
         // 舊的寫法：以項目名稱組路徑會跳出暫存資料夾（「C:」只在 Windows 有特殊意義）
         #[cfg(windows)]
         assert!(!tmp.path().join("C:evil.html").starts_with(tmp.path()));
+    }
+}
+
+#[cfg(not(test))]
+fn send_to_recycle_bin(paths: &[PathBuf]) -> std::io::Result<()> {
+    recycle(paths)
+}
+
+/// 測試時不動到真正的資源回收筒：改名為「原名.recycled」表示已移除
+#[cfg(test)]
+fn send_to_recycle_bin(paths: &[PathBuf]) -> std::io::Result<()> {
+    for p in paths {
+        let mut name = p.file_name().unwrap_or_default().to_os_string();
+        name.push(".recycled");
+        std::fs::rename(p, p.with_file_name(name))?;
+    }
+    Ok(())
+}
+
+/// 把檔案或資料夾移到資源回收筒（可以還原，不會永久刪除）
+#[cfg(windows)]
+#[cfg_attr(test, allow(dead_code))]
+pub fn recycle(paths: &[PathBuf]) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::UI::Shell::{FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, SHFILEOPSTRUCTW, SHFileOperationW};
+    if paths.is_empty() {
+        return Ok(());
+    }
+    // 以 0 分隔、兩個 0 結尾的路徑清單；必須是完整路徑才會移到資源回收筒
+    let mut list: Vec<u16> = Vec::new();
+    for p in paths {
+        let full = std::path::absolute(p)?;
+        list.extend(full.as_os_str().encode_wide());
+        list.push(0);
+    }
+    list.push(0);
+    let mut op = SHFILEOPSTRUCTW {
+        wFunc: FO_DELETE,
+        pFrom: windows::core::PCWSTR(list.as_ptr()),
+        fFlags: (FOF_ALLOWUNDO.0 | FOF_NOCONFIRMATION.0 | FOF_SILENT.0 | FOF_NOERRORUI.0) as u16,
+        ..Default::default()
+    };
+    // SAFETY: 路徑清單在呼叫期間有效，結構依 Windows 的定義建立
+    let r = unsafe { SHFileOperationW(&mut op) };
+    if r != 0 || op.fAnyOperationsAborted.as_bool() {
+        return Err(std::io::Error::other(format!("錯誤代碼 {r:#x}")));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+#[cfg_attr(test, allow(dead_code))]
+pub fn recycle(_paths: &[PathBuf]) -> std::io::Result<()> {
+    Err(std::io::Error::other("只支援 Windows"))
+}
+
+#[cfg(test)]
+mod then_tests {
+    use super::*;
+
+    fn finish(task: Task) -> Outcome {
+        let (_, res) = Job::spawn(task).join();
+        res.unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    #[test]
+    fn compress_then_recycle_sources_and_open_folder() {
+        let t = tempfile::tempdir().unwrap();
+        let src = t.path().join("data");
+        std::fs::create_dir(&src).unwrap();
+        std::fs::write(src.join("a.txt"), "a").unwrap();
+        let out = t.path().join("o.7z");
+        let then = Then { recycle: true, open_folder: true };
+        let o = finish(Task::Compress { inputs: vec![src.clone()], output: out.clone(), format: Format::SevenZ, opts: Default::default(), then });
+        assert!(o.message.contains("原始檔已移到資源回收筒"), "{}", o.message);
+        assert!(!src.exists() && t.path().join("data.recycled").exists());
+        assert!(o.auto_open && o.open_dir.as_deref() == Some(t.path()));
+        // 壓縮檔完整
+        assert_eq!(ziptool_core::test(&out, None, &ziptool_core::NoProgress).unwrap().files, 1);
+    }
+
+    #[test]
+    fn extract_then_recycle_archive_only_when_everything_extracted() {
+        let t = tempfile::tempdir().unwrap();
+        let src = t.path().join("a.txt");
+        std::fs::write(&src, "a").unwrap();
+        std::fs::write(t.path().join("b.txt"), "b").unwrap();
+        let make = |name: &str| {
+            let ar = t.path().join(name);
+            ziptool_core::compress(&[src.clone(), t.path().join("b.txt")], &ar, Format::Zip, &Default::default(), &ziptool_core::NoProgress).unwrap();
+            ar
+        };
+        let then = Then { recycle: true, open_folder: false };
+
+        // 全部解出：壓縮檔移除
+        let ar = make("all.zip");
+        let o = finish(Task::Extract { archives: vec![ar.clone()], dest: t.path().join("x1"), opts: Default::default(), smart: false, then });
+        assert!(o.message.contains("壓縮檔已移到資源回收筒"), "{}", o.message);
+        assert!(!ar.exists() && !o.auto_open);
+
+        // 只解出部分項目：壓縮檔保留
+        let ar = make("part.zip");
+        let opts = ExtractOptions { selection: Some(vec!["a.txt".into()]), ..Default::default() };
+        let o = finish(Task::Extract { archives: vec![ar.clone()], dest: t.path().join("x2"), opts, smart: false, then });
+        assert!(o.message.contains("壓縮檔保留不動"), "{}", o.message);
+        assert!(ar.exists());
+
+        // 沒有勾選：不動
+        let ar = make("keep.zip");
+        finish(Task::Extract { archives: vec![ar.clone()], dest: t.path().join("x3"), opts: Default::default(), smart: false, then: Then::default() });
+        assert!(ar.exists());
     }
 }
