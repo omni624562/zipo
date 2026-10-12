@@ -562,10 +562,41 @@ pub(crate) fn memory_budget() -> u64 {
     if cfg!(target_pointer_width = "32") { half.min(1536 << 20) } else { half }
 }
 
-/// 依記憶體預算決定執行緒數（每個執行緒約需 `per_thread` 位元組），至少 1 個、最多 CPU 核心數。
-pub(crate) fn threads_for(per_thread: u64) -> u32 {
+/// 剩餘預算可容納的執行緒數：至少 1 個（預算用完也要能進行）、最多 `cores` 個
+fn plan_threads(budget: u64, used: u64, per_thread: u64, cores: u64) -> u64 {
+    (budget.saturating_sub(used) / per_thread.max(1)).clamp(1, cores.max(1))
+}
+
+/// 同一個程式內同時進行的工作已保留的記憶體。各工作共用 [`memory_budget`]，
+/// 否則每個工作都以為可以用掉全部預算，同時壓縮多個檔案時（32 位元程式尤其明顯）會耗盡記憶體。
+static RESERVED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 保留的記憶體；丟棄時歸還
+#[must_use]
+pub(crate) struct MemoryReservation(u64);
+
+impl Drop for MemoryReservation {
+    fn drop(&mut self) {
+        RESERVED.fetch_sub(self.0, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// 依「尚未被其他工作保留」的記憶體預算決定執行緒數（每個執行緒約需 `per_thread` 位元組），
+/// 至少 1 個、最多 CPU 核心數，並保留對應的記憶體直到回傳的保留物被丟棄。
+pub(crate) fn reserve_threads(per_thread: u64) -> (u32, MemoryReservation) {
+    use std::sync::atomic::Ordering;
     let cores = std::thread::available_parallelism().map(|n| n.get() as u64).unwrap_or(1);
-    (memory_budget() / per_thread.max(1)).clamp(1, cores) as u32
+    let per = per_thread.max(1);
+    let budget = memory_budget();
+    let mut used = RESERVED.load(Ordering::SeqCst);
+    loop {
+        let threads = plan_threads(budget, used, per, cores);
+        let amount = threads.saturating_mul(per);
+        match RESERVED.compare_exchange(used, used.saturating_add(amount), Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return (threads as u32, MemoryReservation(amount)),
+            Err(now) => used = now,
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -684,13 +715,31 @@ mod tests {
         if cfg!(target_pointer_width = "32") {
             assert!(budget <= 1536 << 20, "32 位元程式的預算不可超過 1.5 GB");
         }
-        // 每個執行緒需要的記憶體越多，執行緒越少，但至少 1 個
-        assert!(threads_for(1 << 30) <= threads_for(64 << 20));
-        assert_eq!(threads_for(u64::MAX), 1);
-        // 最高等級 7z（字典 64 MB）在 32 位元下只能單執行緒
-        if cfg!(target_pointer_width = "32") {
-            assert_eq!(threads_for((64 << 20) * 16), 1);
-        }
+        // 每個執行緒需要的記憶體越多，執行緒越少，但至少 1 個、最多核心數
+        const GB: u64 = 1 << 30;
+        assert_eq!(plan_threads(4 * GB, 0, GB, 16), 4);
+        assert_eq!(plan_threads(4 * GB, 0, 64 << 20, 16), 16);
+        assert_eq!(plan_threads(4 * GB, 0, u64::MAX, 16), 1);
+        // 其他工作已用掉的部分要扣除；用完時仍可用 1 個
+        assert_eq!(plan_threads(4 * GB, 3 * GB, GB, 16), 1);
+        assert_eq!(plan_threads(4 * GB, 5 * GB, GB, 16), 1);
+        assert_eq!(plan_threads(4 * GB, GB, GB, 16), 3);
+        // 32 位元的預算（1.5 GB）下，最高等級 7z（字典 64 MB，每執行緒約 1 GB）只能單執行緒
+        assert_eq!(plan_threads(1536 << 20, 0, (64 << 20) * 16, 16), 1);
+    }
+
+    /// 同時進行的工作共用記憶體預算：預算被占用時，後來的工作只能用較少的執行緒；歸還後恢復
+    #[test]
+    fn concurrent_work_shares_the_budget() {
+        // 其他測試可能同時保留記憶體，只會讓這裡分到更少，以下性質不受影響
+        let per = memory_budget() / 4;
+        let (first, held) = reserve_threads(per);
+        let (second, held2) = reserve_threads(per);
+        assert!((1..=4).contains(&first) && second >= 1);
+        assert!(first + second <= 5, "合計不可超過預算太多：{first} + {second}");
+        assert!(RESERVED.load(std::sync::atomic::Ordering::SeqCst) >= u64::from(first + second) * per);
+        drop(held);
+        drop(held2);
     }
 
     #[test]

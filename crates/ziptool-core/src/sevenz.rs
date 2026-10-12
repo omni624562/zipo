@@ -222,7 +222,7 @@ pub(crate) fn compress(items: &[Item], output: &Path, opts: &CompressOptions, pr
     // 與 7-Zip 相同：多執行緒時每個工作區塊為字典大小的 4 倍。
     // 每個執行緒約需「字典 × 12（比對結構）＋ 工作區塊」的記憶體。
     let dict = dict_size(level);
-    let threads = crate::util::threads_for(dict * 12 + dict * 4);
+    let (threads, _mem) = crate::util::reserve_threads(dict * 12 + dict * 4);
     let lzma2 = Lzma2Options::from_level_mt(level, threads, dict * 4);
     match &opts.password {
         Some(pw) => {
@@ -282,7 +282,8 @@ fn for_each(
     check_header_size(archive)?;
     let mut reader = ArchiveReader::new(BufReader::new(File::open(archive)?), password(pw)).map_err(map_err)?;
     // 解碼時每個執行緒最多需要一個字典（最大 64 MB）加上緩衝區
-    reader.set_thread_count(crate::util::threads_for(160 << 20));
+    let (threads, _mem) = crate::util::reserve_threads(160 << 20);
+    reader.set_thread_count(threads);
     progress.start(reader.archive().files.iter().filter(|f| select(f.name())).map(|f| f.size()).fold(0u64, u64::saturating_add));
 
     let mut own_err = None;

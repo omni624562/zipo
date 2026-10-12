@@ -11,7 +11,8 @@ use crate::{Entry, Error, Format, Progress, Result, TestReport};
 pub(crate) enum Encoder<W: Write> {
     Gz(flate2::write::GzEncoder<W>),
     Bz2(bzip2::write::BzEncoder<W>),
-    Xz(xz2::write::XzEncoder<W>),
+    /// 多執行緒 xz 保留的記憶體與編碼器一起存在，壓縮完成後才歸還
+    Xz(xz2::write::XzEncoder<W>, crate::util::MemoryReservation),
     Zst(zstd::stream::write::Encoder<'static, W>),
 }
 
@@ -20,7 +21,7 @@ impl<W: Write> Encoder<W> {
         match self {
             Encoder::Gz(e) => e.finish(),
             Encoder::Bz2(e) => e.finish(),
-            Encoder::Xz(e) => e.finish(),
+            Encoder::Xz(e, _mem) => e.finish(),
             Encoder::Zst(e) => e.finish(),
         }
     }
@@ -31,7 +32,7 @@ impl<W: Write> Write for Encoder<W> {
         match self {
             Encoder::Gz(e) => e.write(buf),
             Encoder::Bz2(e) => e.write(buf),
-            Encoder::Xz(e) => e.write(buf),
+            Encoder::Xz(e, _) => e.write(buf),
             Encoder::Zst(e) => e.write(buf),
         }
     }
@@ -39,7 +40,7 @@ impl<W: Write> Write for Encoder<W> {
         match self {
             Encoder::Gz(e) => e.flush(),
             Encoder::Bz2(e) => e.flush(),
-            Encoder::Xz(e) => e.flush(),
+            Encoder::Xz(e, _) => e.flush(),
             Encoder::Zst(e) => e.flush(),
         }
     }
@@ -61,15 +62,16 @@ pub(crate) fn encoder<W: Write>(f: Format, w: W, level: Option<u32>) -> Result<E
             // 多執行緒 xz：輸出仍是標準 .xz，任何 xz 工具都能解開；建立失敗時退回單執行緒。
             // 每個執行緒約需「字典 × 12 ＋ 2 個區塊（區塊為字典的 3 倍）」的記憶體。
             let dict = xz_dict_size(preset);
+            let (threads, mem) = crate::util::reserve_threads(dict * 18);
             let mt = xz2::stream::MtStreamBuilder::new()
-                .threads(crate::util::threads_for(dict * 18))
+                .threads(threads)
                 .block_size(dict * 3)
                 .preset(preset)
                 .check(xz2::stream::Check::Crc64)
                 .encoder();
             match mt {
-                Ok(stream) => Encoder::Xz(xz2::write::XzEncoder::new_stream(w, stream)),
-                Err(_) => Encoder::Xz(xz2::write::XzEncoder::new(w, preset)),
+                Ok(stream) => Encoder::Xz(xz2::write::XzEncoder::new_stream(w, stream), mem),
+                Err(_) => Encoder::Xz(xz2::write::XzEncoder::new(w, preset), mem),
             }
         }
         Format::Zst => {
