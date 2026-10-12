@@ -366,7 +366,8 @@ mod open_inside_tests {
         std::fs::write(tmp.path().join("docs/C_evil.html"), "x").unwrap();
         let f = extracted_file(tmp.path()).unwrap();
         assert_eq!(f, tmp.path().join("docs").join("C_evil.html"));
-        // 舊的寫法：以項目名稱組路徑會跳出暫存資料夾
+        // 舊的寫法：以項目名稱組路徑會跳出暫存資料夾（「C:」只在 Windows 有特殊意義）
+        #[cfg(windows)]
         assert!(!tmp.path().join("C:evil.html").starts_with(tmp.path()));
     }
 }

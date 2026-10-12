@@ -960,7 +960,8 @@ fn max_length_file_names_extract() {
     let tmp = tempfile::tempdir().unwrap();
     let src = tmp.path().join("src");
     fs::create_dir(&src).unwrap();
-    let long = format!("{}.txt", "長".repeat(251));
+    // Windows 的上限是 255 個字元；Linux／macOS 是 255 個位元組，中文字會超過，改用英文字母
+    let long = format!("{}.txt", if cfg!(windows) { "長" } else { "a" }.repeat(251));
     fs::write(src.join(&long), "x").unwrap();
     for f in [Format::Zip, Format::Tar, Format::SevenZ] {
         let ar = tmp.path().join(format!("l.{}", f.extension()));
