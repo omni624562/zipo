@@ -114,7 +114,15 @@ pub fn unregister_default(base: &str) -> std::io::Result<()> {
         _ => Ok(()),
     };
     ignore_missing(hkcu.delete_subkey_all(format!(r"{base}\Classes\{PROG_ID}")))?;
-    ignore_missing(hkcu.delete_subkey_all(format!(r"{base}\{APP_NAME}")))?;
+    // 只刪除自己建立的 Capabilities；同名機碼下若有其他程式的設定則保留，空了才刪除上層機碼
+    ignore_missing(hkcu.delete_subkey_all(format!(r"{base}\{APP_NAME}\Capabilities")))?;
+    if let Ok(k) = hkcu.open_subkey(format!(r"{base}\{APP_NAME}"))
+        && k.enum_keys().next().is_none()
+        && k.enum_values().next().is_none()
+    {
+        drop(k);
+        ignore_missing(hkcu.delete_subkey(format!(r"{base}\{APP_NAME}")))?;
+    }
     for ext in ARCHIVE_EXTS {
         if let Ok(k) = hkcu.open_subkey_with_flags(format!(r"{base}\Classes\{ext}\OpenWithProgids"), winreg::enums::KEY_SET_VALUE) {
             ignore_missing(k.delete_value(PROG_ID))?;
@@ -243,6 +251,14 @@ mod tests {
         assert!(zip_owp.get_raw_value(PROG_ID).is_err());
         assert!(zip_owp.get_raw_value("Other.Zip").is_ok());
         unregister_default(&base).unwrap();
+
+        // 同名機碼下其他程式的設定不可被刪除
+        hkcu.create_subkey(format!(r"{base}\{APP_NAME}\Settings")).unwrap().0.set_value("Keep", &"1").unwrap();
+        register_default(&base, exe).unwrap();
+        unregister_default(&base).unwrap();
+        assert!(hkcu.open_subkey(format!(r"{base}\{APP_NAME}\Capabilities")).is_err());
+        let kept: String = hkcu.open_subkey(format!(r"{base}\{APP_NAME}\Settings")).unwrap().get_value("Keep").unwrap();
+        assert_eq!(kept, "1");
         hkcu.delete_subkey_all(&base).unwrap();
     }
 }
