@@ -340,6 +340,15 @@ enum PreviewState {
     Ready(preview::Content),
 }
 
+/// 拖曳時已解出的項目；壓縮檔沒有變動時，再次拖曳同樣的項目不必重新解壓縮
+struct DragCache {
+    archive: PathBuf,
+    stamp: Option<(u64, Option<SystemTime>)>,
+    /// 排序後的項目名稱
+    entries: Vec<String>,
+    items: Vec<PathBuf>,
+}
+
 /// 壓縮檔內的壓縮檔：解到暫存資料夾後瀏覽（唯讀）
 struct Nested {
     /// 暫存資料夾中的壓縮檔
@@ -468,6 +477,7 @@ struct App {
     watched: Vec<Watched>,
     /// 已開啟的壓縮檔內的壓縮檔
     nested: Vec<Nested>,
+    drag_cache: Vec<DragCache>,
     /// 顯示預覽窗格（檢視 › 預覽窗格，Alt+P）
     preview_open: bool,
     preview: Option<Preview>,
@@ -524,6 +534,7 @@ impl App {
             preview_open: false,
             preview: None,
             nested: Vec::new(),
+            drag_cache: Vec::new(),
             last_watch_check: std::time::Instant::now(),
             #[cfg(debug_assertions)]
             perf: perf::Perf::from_env(),
@@ -856,17 +867,23 @@ impl App {
     }
 
     /// 解出要拖曳的項目，回傳暫存資料夾中最上層的檔案與資料夾；無法拖曳時顯示原因並回傳 `None`
-    fn prepare_drag_out(&mut self, entries: Vec<String>) -> Option<Vec<PathBuf>> {
+    fn prepare_drag_out(&mut self, mut entries: Vec<String>) -> Option<Vec<PathBuf>> {
         let Location::Archive { path, inner } = self.loc.clone() else { return None };
-        // 拖曳前要先解完，太大時畫面會停住太久
+        entries.sort();
+        // 之前已解出過同樣的項目，且壓縮檔沒有變動：直接拖曳
+        let archive_stamp = file_stamp(&path);
+        self.drag_cache.retain(|c| c.items.iter().all(|i| i.exists()));
+        if let Some(c) = self.drag_cache.iter().find(|c| c.archive == path && c.entries == entries && c.stamp == archive_stamp) {
+            return Some(c.items.clone());
+        }
+        // 拖曳前要先解完；太大時改在背景解壓縮並顯示進度，完成後再拖曳一次
         let size: u64 = self.selected_rows().iter().filter_map(|r| r.size).sum();
         if size > DRAG_OUT_MAX {
-            self.notice(
-                "項目太大，無法拖曳",
-                format!("拖曳前需要先解壓縮（約 {}）。超過 {} 時請改用「解壓縮」。", ziptool_core::format_size(size), ziptool_core::format_size(DRAG_OUT_MAX)),
-            );
+            let password = self.cache.as_ref().and_then(|c| c.password.clone());
+            self.spawn(Task::PrepareDrag { archive: path, entries, strip: inner, password });
             return None;
         }
+        let cache_entries = entries.clone();
         let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
         let dir = std::env::temp_dir().join("Zipo").join(format!("{}-drag-{stamp}", std::process::id()));
         let password = self.cache.as_ref().and_then(|c| c.password.clone());
@@ -893,7 +910,11 @@ impl App {
             }
         }
         let items: Vec<PathBuf> = std::fs::read_dir(&dir).map(|d| d.flatten().map(|e| e.path()).collect()).unwrap_or_default();
-        (!items.is_empty()).then_some(items)
+        if items.is_empty() {
+            return None;
+        }
+        self.drag_cache.push(DragCache { archive: path, stamp: archive_stamp, entries: cache_entries, items: items.clone() });
+        Some(items)
     }
 
     /// 啟動時的自動檢查：開啟此功能且距離上次檢查超過一天才連線
@@ -1343,6 +1364,13 @@ impl App {
             {
                 self.watch(archive.clone(), entry.clone(), file.clone(), password.clone());
             }
+            if let (Task::PrepareDrag { archive, entries, .. }, Ok(out)) = (&task, &res)
+                && !out.prepared.is_empty()
+            {
+                let mut entries = entries.clone();
+                entries.sort();
+                self.drag_cache.push(DragCache { archive: archive.clone(), stamp: file_stamp(archive), entries, items: out.prepared.clone() });
+            }
             if let (Task::OpenNested { archive, strip, .. }, Ok(out)) = (&task, &res)
                 && let Some(file) = &out.opened
             {
@@ -1382,7 +1410,7 @@ impl App {
                 Err(e @ (Error::PasswordRequired | Error::WrongPassword)) => {
                     let name = match &task {
                         Task::Extract { archives, .. } | Task::Test { archives, .. } => file_name(&archives[0]),
-                        Task::OpenInside { archive, .. } | Task::OpenNested { archive, .. } => file_name(archive),
+                        Task::OpenInside { archive, .. } | Task::OpenNested { archive, .. } | Task::PrepareDrag { archive, .. } => file_name(archive),
                         Task::Compress { output, .. } => file_name(output),
                         Task::Update { archive, .. } | Task::HashInside { archive, .. } => file_name(archive),
                         Task::Hash { inputs } => inputs.first().map(|p| file_name(p)).unwrap_or_default(),
@@ -2515,7 +2543,7 @@ fn preview_inside(archive: &Path, entry: &str, strip: &str, password: Option<Str
 
 const NESTED_READ_ONLY: &str = "這是壓縮檔內的壓縮檔（暫存的副本），只能瀏覽、解壓縮，無法直接修改。若要修改，請先把它解壓縮出來。";
 
-/// 拖曳到程式外時先解壓縮的大小上限（解壓縮期間畫面會停住）
+/// 拖曳時直接解壓縮的大小上限；更大時改在背景解壓縮（顯示進度），完成後再拖曳一次
 const DRAG_OUT_MAX: u64 = 256 << 20;
 
 /// 交給系統的拖放；只複製，不移動
@@ -3641,6 +3669,43 @@ mod drag_out_tests {
         assert_eq!(std::fs::read_to_string(items[1].join("b.txt")).unwrap(), "B");
         assert!(items[0].starts_with(std::env::temp_dir().join("Zipo")));
         assert!(app.dialog.is_none());
+    }
+
+    /// 大型項目：先在背景準備（有進度），完成後再拖曳一次即可立即開始
+    #[test]
+    fn large_items_are_prepared_in_background() {
+        let t = tempfile::tempdir().unwrap();
+        let (mut app, ctx) = archive_in_docs(&real_path(t.path()), None);
+        let i = app.rows.iter().position(|r| r.name == "a.txt").unwrap();
+        app.rows[i].size = Some(DRAG_OUT_MAX + 1);
+        app.sel = [i].into();
+        assert!(app.prepare_drag_out(vec!["docs/a.txt".into()]).is_none());
+        assert!(matches!(app.job.as_ref().map(|j| &j.task), Some(Task::PrepareDrag { .. })));
+        load(&mut app, &ctx);
+        assert!(matches!(&app.dialog, Some(Dialog::Notice { title, .. }) if title == "已準備好拖曳"));
+        app.dialog = None;
+        let items = app.prepare_drag_out(vec!["docs/a.txt".into()]).expect("第二次應直接拖曳");
+        assert!(app.job.is_none());
+        assert_eq!(std::fs::read_to_string(&items[0]).unwrap(), "A");
+    }
+
+    /// 同樣的項目不重複解壓縮；壓縮檔改變後重新解壓縮
+    #[test]
+    fn drag_cache_reuses_until_archive_changes() {
+        let t = tempfile::tempdir().unwrap();
+        let root = real_path(t.path());
+        let (mut app, _ctx) = archive_in_docs(&root, None);
+        app.sel = [app.rows.iter().position(|r| r.name == "a.txt").unwrap()].into();
+        let first = app.prepare_drag_out(vec!["docs/a.txt".into()]).unwrap();
+        let again = app.prepare_drag_out(vec!["docs/a.txt".into()]).unwrap();
+        assert_eq!(first, again, "未改變時應沿用");
+        // 修改壓縮檔（時間往後，確保看得出變動）
+        let ar = root.join("d.zip");
+        let f = std::fs::File::options().append(true).open(&ar).unwrap();
+        f.set_modified(SystemTime::now() + Duration::from_secs(30)).unwrap();
+        drop(f);
+        let changed = app.prepare_drag_out(vec!["docs/a.txt".into()]).unwrap();
+        assert_ne!(first, changed, "壓縮檔改變後應重新解壓縮");
     }
 
     #[test]

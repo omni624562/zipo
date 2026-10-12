@@ -30,6 +30,8 @@ pub enum Task {
     Update { archive: PathBuf, add: Vec<PathBuf>, into: String, remove: Vec<String>, password: Option<String> },
     /// 把壓縮檔內的單一檔案解到暫存資料夾後，用系統預設程式開啟。
     OpenInside { archive: PathBuf, entry: String, strip: String, password: Option<String> },
+    /// 拖曳大型項目前，先在背景解到暫存資料夾（顯示進度），完成後再拖曳一次即可
+    PrepareDrag { archive: PathBuf, entries: Vec<String>, strip: String, password: Option<String> },
     /// 把壓縮檔內的壓縮檔解到暫存資料夾，以便直接瀏覽
     OpenNested { archive: PathBuf, entry: String, strip: String, password: Option<String> },
     /// 計算檔案（資料夾則為其中每個檔案）的雜湊值
@@ -45,6 +47,7 @@ impl Task {
             Task::Extract { .. } => "正在解壓縮",
             Task::Test { .. } => "正在測試",
             Task::OpenInside { .. } | Task::OpenNested { .. } => "正在開啟",
+            Task::PrepareDrag { .. } => "正在準備拖曳",
             Task::Update { .. } => "正在更新壓縮檔",
             Task::Hash { .. } | Task::HashInside { .. } => "正在計算雜湊值",
         }
@@ -57,7 +60,8 @@ impl Task {
             | Task::OpenInside { password, .. }
             | Task::Update { password, .. }
             | Task::HashInside { password, .. }
-            | Task::OpenNested { password, .. } => *password = Some(pw),
+            | Task::OpenNested { password, .. }
+            | Task::PrepareDrag { password, .. } => *password = Some(pw),
             Task::Compress { .. } | Task::Hash { .. } => {}
         }
     }
@@ -85,6 +89,8 @@ pub struct Outcome {
     pub auto_open: bool,
     /// 開啟壓縮檔內的檔案時，實際解出並開啟的檔案（用來偵測修改後存回）
     pub opened: Option<PathBuf>,
+    /// 準備拖曳時解出的最上層項目
+    pub prepared: Vec<PathBuf>,
 }
 
 /// 取得鎖；即使另一個執行緒在持有鎖時 panic，也繼續使用資料而不連鎖 panic。
@@ -392,6 +398,27 @@ fn run(task: Task, s: &Shared) -> Result<Outcome, Error> {
             })();
             let _ = std::fs::remove_dir_all(&dir);
             Ok(Outcome { hashes: r?, ..Default::default() })
+        }
+        Task::PrepareDrag { archive, entries, strip, password } => {
+            let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+            let dir = std::env::temp_dir().join("Zipo").join(format!("{}-drag-{stamp}", std::process::id()));
+            let opts = ExtractOptions { password, selection: Some(entries), strip_prefix: strip, ..Default::default() };
+            let r = ziptool_core::extract(&archive, &dir, &opts, s);
+            let r = r.and_then(|r| match r.issues.first() {
+                Some(i) => Err(Error::Unsupported(format!("無法拖曳 {}：{}", i.name, i.reason))),
+                None => Ok(()),
+            });
+            if let Err(e) = r {
+                let _ = std::fs::remove_dir_all(&dir);
+                return Err(e);
+            }
+            let prepared: Vec<PathBuf> = std::fs::read_dir(&dir).map(|d| d.flatten().map(|e| e.path()).collect()).unwrap_or_default();
+            Ok(Outcome {
+                title: "已準備好拖曳".into(),
+                message: "項目已解壓縮完成。請再把它們拖曳到目的地一次，這次會立即開始。".into(),
+                prepared,
+                ..Default::default()
+            })
         }
         Task::OpenNested { archive, entry, strip, password } => {
             let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
