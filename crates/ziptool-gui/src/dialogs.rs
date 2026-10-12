@@ -20,6 +20,9 @@ pub enum Outcome<T> {
 /// 7-Zip 的壓縮等級名稱
 pub const LEVELS: [(u32, &str); 6] = [(0, "儲存"), (1, "最快"), (3, "快速"), (5, "標準"), (7, "最大"), (9, "極限")];
 
+/// 分割大小的選項（顯示文字, 位元組）；最後一項為自訂
+const VOLUMES: [(&str, u64); 5] = [("不分割", 0), ("100 MB", 100 << 20), ("700 MB（CD）", 700 << 20), ("4 GB（FAT32 隨身碟）", (4 << 30) - (1 << 20)), ("自訂…", 0)];
+
 pub struct AddDialog {
     inputs: Vec<PathBuf>,
     archive: String,
@@ -31,6 +34,9 @@ pub struct AddDialog {
     encrypt_names: bool,
     /// 壓縮後將原始檔移到資源回收筒
     recycle: bool,
+    /// 分割大小：`VOLUMES` 的索引；自訂時為 `volume_mb`
+    volume: usize,
+    volume_mb: String,
     pub open_folder: bool,
     error: Option<String>,
 }
@@ -61,6 +67,8 @@ impl AddDialog {
             encrypt_names: false,
             recycle: false,
             open_folder: false,
+            volume: 0,
+            volume_mb: String::new(),
             error: None,
         }
     }
@@ -97,6 +105,16 @@ impl AddDialog {
         if output.exists() {
             return Err("壓縮檔已存在，請換一個名稱（目前不支援更新既有壓縮檔）".into());
         }
+        let volume_size = match self.volume {
+            0 => None,
+            i if i == VOLUMES.len() - 1 => Some(
+                self.volume_mb.trim().parse::<u64>().ok().filter(|&n| n > 0).map(|n| n << 20).ok_or("請輸入分割大小（MB，正整數）")?,
+            ),
+            i => Some(VOLUMES[i].1),
+        };
+        if volume_size.is_some() && output.with_file_name(format!("{}.001", output.file_name().unwrap_or_default().to_string_lossy())).exists() {
+            return Err("分割檔已存在，請換一個名稱".into());
+        }
         Ok(Task::Compress {
             inputs: self.inputs.clone(),
             output,
@@ -105,6 +123,7 @@ impl AddDialog {
                 level: Some(LEVELS[self.level].0),
                 encrypt_names: self.encrypt_names && password.is_some() && self.format == Format::SevenZ,
                 password,
+                volume_size,
             },
             then: Then { recycle: self.recycle, open_folder: self.open_folder },
         })
@@ -159,6 +178,22 @@ impl AddDialog {
                 };
                 ui.label(RichText::new(method).color(p.text));
                 ui.end_row();
+
+                field_label(ui, "分割大小");
+                egui::ComboBox::from_id_salt("vol").width(150.0).selected_text(VOLUMES[self.volume].0).show_ui(ui, |ui| {
+                    for (i, (name, _)) in VOLUMES.iter().enumerate() {
+                        ui.selectable_value(&mut self.volume, i, *name);
+                    }
+                });
+                ui.end_row();
+                if self.volume == VOLUMES.len() - 1 {
+                    field_label(ui, "");
+                    ui.horizontal(|ui| {
+                        ui.add(egui::TextEdit::singleline(&mut self.volume_mb).desired_width(90.0).hint_text("例如 500"));
+                        ui.label(RichText::new("MB").color(p.text2));
+                    });
+                    ui.end_row();
+                }
             });
 
             let ui = &mut cols[1];

@@ -62,6 +62,10 @@ impl Format {
 
     /// 拆出「去掉壓縮副檔名後的檔名」與格式，例如 `a.tar.gz` → (`a`, TarGz)。
     pub fn split_extension(name: &str) -> Option<(&str, Format)> {
+        // 分割檔的第一個（例如 a.7z.001）視為該格式
+        if let Some(first) = name.strip_suffix(".001") {
+            return Self::split_extension(first);
+        }
         let n = name.to_ascii_lowercase();
         let table: [(&str, Format); 17] = [
             (".tar.gz", Format::TarGz),

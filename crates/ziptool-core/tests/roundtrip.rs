@@ -983,3 +983,63 @@ fn options_debug_hides_password() {
     }
     assert!(format!("{:?}", CompressOptions::default()).contains("password: None"));
 }
+
+/// 分割壓縮：產生 名稱.001…，從 .001 列出、測試、解壓縮都與原本相同；分割檔不可直接修改
+#[test]
+fn split_volumes_roundtrip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = make_tree(tmp.path());
+    // 不易壓縮的資料，確保每種格式都會分割成多個檔案
+    let mut x = 12345u32;
+    let noise: Vec<u8> = (0..150_000)
+        .map(|_| {
+            x = x.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            (x >> 16) as u8
+        })
+        .collect();
+    fs::write(src.join("sub/noise.bin"), noise).unwrap();
+    for f in [Format::Zip, Format::SevenZ, Format::TarGz, Format::Gz] {
+        let input = if f.is_single() { src.join("sub/noise.bin") } else { src.clone() };
+        let ar = tmp.path().join(format!("v.{}", f.extension()));
+        let opts = CompressOptions { level: Some(0), volume_size: Some(40_000), ..Default::default() };
+        compress(std::slice::from_ref(&input), &ar, f, &opts, &NoProgress).unwrap();
+        assert!(!ar.exists(), "{f:?}：原檔應已分割");
+        let first = tmp.path().join(format!("v.{}.001", f.extension()));
+        let parts: Vec<_> = (1..).map(|n| tmp.path().join(format!("v.{}.{n:03}", f.extension()))).take_while(|p| p.is_file()).collect();
+        assert!(parts.len() >= 3, "{f:?}：{}", parts.len());
+        assert!(parts.iter().all(|p| fs::metadata(p).unwrap().len() <= 40_000));
+        assert_eq!(Format::from_file_name(&first.file_name().unwrap().to_string_lossy()), Some(f));
+
+        assert!(!list(&first, None).unwrap().is_empty(), "{f:?}");
+        test(&first, None, &NoProgress).unwrap();
+        let out = tmp.path().join(format!("out-{}", f.extension()));
+        extract(&first, &out, &ExtractOptions::default(), &NoProgress).unwrap();
+        if f.is_single() {
+            assert_eq!(fs::read(out.join("v")).unwrap(), fs::read(&input).unwrap(), "{f:?}");
+        } else {
+            assert_same_tree(&src, &out.join("src"));
+        }
+        let e = update(&first, &[], "", &["x".into()], &CompressOptions::default(), &NoProgress).unwrap_err();
+        assert!(e.to_string().contains("分割"), "{e}");
+    }
+}
+
+/// 從網路下載的分割檔，解出的檔案也要有「從網際網路下載」的標記
+#[cfg(windows)]
+#[test]
+fn split_volumes_keep_mark_of_the_web() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = make_tree(tmp.path());
+    let ar = tmp.path().join("m.zip");
+    let opts = CompressOptions { level: Some(0), volume_size: Some(50_000), ..Default::default() };
+    compress(&[src], &ar, Format::Zip, &opts, &NoProgress).unwrap();
+    let first = tmp.path().join("m.zip.001");
+    let mut ads = first.as_os_str().to_os_string();
+    ads.push(":Zone.Identifier");
+    fs::write(&ads, "[ZoneTransfer]\r\nZoneId=3\r\n").unwrap();
+    let out = tmp.path().join("out");
+    extract(&first, &out, &ExtractOptions::default(), &NoProgress).unwrap();
+    let mut got = out.join("src/a.txt").into_os_string();
+    got.push(":Zone.Identifier");
+    assert!(fs::read_to_string(got).unwrap().contains("ZoneId=3"));
+}

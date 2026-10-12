@@ -204,3 +204,25 @@ fn hash_command() {
     assert!(t.contains("CRC32   352441c2"), "{t}");
     assert_eq!(run(tmp.path(), &["h", "不存在.txt"], "").status.code(), Some(2));
 }
+
+/// -v 分割壓縮，再從 .001 解壓縮
+#[test]
+fn split_volumes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut x = 7u32;
+    let data: Vec<u8> = (0..200_000)
+        .map(|_| {
+            x = x.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            (x >> 16) as u8
+        })
+        .collect();
+    fs::write(tmp.path().join("big.bin"), &data).unwrap();
+    let o = run(tmp.path(), &["a", "-bd", "-v50k", "-tzip", "v.zip", "big.bin"], "");
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(text(&o).contains("已分割為"), "{}", text(&o));
+    assert!(tmp.path().join("v.zip.001").is_file() && tmp.path().join("v.zip.004").is_file());
+    let o = run(tmp.path(), &["x", "-bd", "-y", "-oout", "v.zip.001"], "");
+    assert!(o.status.success(), "{}", text(&o));
+    assert_eq!(fs::read(tmp.path().join("out/big.bin")).unwrap(), data);
+    assert_eq!(run(tmp.path(), &["a", "-v0", "w.zip", "big.bin"], "").status.code(), Some(7));
+}

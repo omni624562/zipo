@@ -8,6 +8,7 @@ mod sevenz;
 mod single;
 mod tar_fmt;
 mod util;
+mod volume;
 mod zip_fmt;
 
 use std::path::{Path, PathBuf};
@@ -16,6 +17,7 @@ use std::time::SystemTime;
 pub use format::Format;
 pub use hash::{Hashes, hash_files, hash_reader};
 pub use progress::{NoProgress, OverwriteAnswer, Progress};
+pub use volume::{is_first_volume, parse_size as parse_volume_size};
 pub use util::{describe, format_size, local_time, set_zip_codepage, zip_codepage};
 
 #[derive(Debug, thiserror::Error)]
@@ -65,6 +67,8 @@ pub struct CompressOptions {
     pub password: Option<String>,
     /// 加密檔名（僅 7z，需搭配密碼）；對應 7-Zip 的 `-mhe=on`。
     pub encrypt_names: bool,
+    /// 分割大小（位元組）；設定時產生 `名稱.001`、`名稱.002`…（與 7-Zip 的 `-v` 相同）
+    pub volume_size: Option<u64>,
 }
 
 /// 目的檔已存在時的處理方式；對應 7-Zip 的 `-aoa`／`-aos`／`-aou`。
@@ -105,6 +109,7 @@ impl std::fmt::Debug for CompressOptions {
             .field("level", &self.level)
             .field("password", &format_args!("{}", redacted(&self.password)))
             .field("encrypt_names", &self.encrypt_names)
+            .field("volume_size", &self.volume_size)
             .finish()
     }
 }
@@ -201,7 +206,11 @@ pub fn compress(
         f if f.is_tar() => tar_fmt::compress(&items, &part, f, opts.level, progress),
         f => single::compress(&items[0], &part, f, opts.level, progress),
     }
-    .and_then(|()| Ok(std::fs::rename(&part, output)?));
+    .and_then(|()| Ok(std::fs::rename(&part, output)?))
+    .and_then(|()| match opts.volume_size {
+        Some(size) => volume::split(output, size).map(drop),
+        None => Ok(()),
+    });
     if res.is_err() {
         let _ = std::fs::remove_file(&part);
     }
@@ -221,6 +230,9 @@ pub fn update(
     opts: &CompressOptions,
     progress: &dyn Progress,
 ) -> Result<()> {
+    if volume::is_first_volume(archive) {
+        return Err(Error::Unsupported("分割的壓縮檔無法直接修改；請先解壓縮，再重新壓縮".into()));
+    }
     let format = Format::detect(archive)?;
     if format.is_single() {
         return Err(Error::Unsupported(format!("{} 只能包含單一檔案，無法加入或刪除項目", format.name())));
@@ -306,6 +318,9 @@ pub fn update(
 /// 單一項目的錯誤（權限、路徑、連結）會記錄在報告中並繼續處理其他項目；
 /// 壓縮檔本身的錯誤（損壞、密碼錯誤）則中止並回傳錯誤。
 pub fn extract(archive: &Path, dest: &Path, opts: &ExtractOptions, progress: &dyn Progress) -> Result<ExtractReport> {
+    // 分割檔（名稱.001）先接回暫存的完整壓縮檔
+    let joined = volume::join_if_split(archive)?;
+    let archive = joined.as_ref().map_or(archive, |j| j.path.as_path());
     let format = Format::detect(archive)?;
     std::fs::create_dir_all(dest)?;
     let available = fs4::available_space(dest).ok();
@@ -352,6 +367,8 @@ fn check_size(need: u64, packed: u64, available: Option<u64>, allow_high_ratio: 
 
 /// 列出 `archive` 的內容。
 pub fn list(archive: &Path, password: Option<&str>) -> Result<Vec<Entry>> {
+    let joined = volume::join_if_split(archive)?;
+    let archive = joined.as_ref().map_or(archive, |j| j.path.as_path());
     let mut entries = match Format::detect(archive)? {
         Format::Zip => zip_fmt::list(archive)?,
         Format::SevenZ => sevenz::list(archive, password)?,
@@ -367,6 +384,8 @@ pub fn list(archive: &Path, password: Option<&str>) -> Result<Vec<Entry>> {
 
 /// 測試壓縮檔完整性：完整解碼每個項目並驗證 CRC，但不寫出任何檔案。
 pub fn test(archive: &Path, password: Option<&str>, progress: &dyn Progress) -> Result<TestReport> {
+    let joined = volume::join_if_split(archive)?;
+    let archive = joined.as_ref().map_or(archive, |j| j.path.as_path());
     let res = match Format::detect(archive)? {
         Format::Zip => zip_fmt::test(archive, password, progress),
         Format::SevenZ => sevenz::test(archive, password, progress),

@@ -35,6 +35,8 @@ const HELP: &str = "\
   -p{密碼} : 設定密碼；只寫 -p 則以互動方式輸入（建議：寫在命令列的密碼
              會被其他程式看到，也會留在命令歷程中）
   -r       : 遞迴處理子資料夾（預設即為遞迴，可省略）
+  -v{大小} : 分割成多個檔案，例如 -v100m、-v4g（產生 名稱.001、名稱.002…）；
+             解壓縮時指定 名稱.001 即可
   -t{格式} : 壓縮檔格式：7z、zip、tar、tar.gz、tar.bz2、tar.xz、tar.zst、gzip、bzip2、xz、zstd
   -y       : 所有詢問都回答「是」（不互動詢問）
 
@@ -86,6 +88,8 @@ struct Args {
     overwrite: Option<Overwrite>,
     yes: bool,
     no_progress: bool,
+    /// 分割大小（-v）
+    volume: Option<u64>,
 }
 
 fn parse_format(s: &str) -> Option<Format> {
@@ -146,6 +150,9 @@ fn parse(argv: Vec<String>) -> Result<Args, String> {
                     return Err(format!("壓縮等級須為 0–9：{arg}"));
                 }
                 a.level = Some(lv);
+            }
+            _ if lower.starts_with('v') => {
+                a.volume = Some(ziptool_core::parse_volume_size(&sw[1..]).ok_or_else(|| format!("無效的分割大小：{arg}"))?);
             }
             // 保留大小寫：路徑與密碼
             _ if lower.starts_with('o') => a.out = Some(PathBuf::from(&sw[1..])),
@@ -330,9 +337,12 @@ fn cmd_add(a: &Args) -> anyhow::Result<()> {
         Some(p) if p.is_empty() => Some(prompt_password(true)?),
         other => other.clone(),
     };
-    let opts = CompressOptions { level: a.level, password, encrypt_names: a.encrypt_names };
+    let opts = CompressOptions { level: a.level, password, encrypt_names: a.encrypt_names, volume_size: a.volume };
 
     let bar = Bar::new(a.no_progress);
+    if archive.exists() && a.volume.is_some() {
+        anyhow::bail!("壓縮檔已存在，無法以分割方式更新：{}", archive.display());
+    }
     if archive.exists() {
         // 與 7-Zip 相同：壓縮檔已存在時加入（同名項目取代），原檔在全部完成後才被替換
         println!("正在更新壓縮檔：{}", archive.display());
@@ -342,6 +352,13 @@ fn cmd_add(a: &Args) -> anyhow::Result<()> {
         ziptool_core::compress(&inputs, &archive, format, &opts, &bar)?;
     }
     bar.0.finish_and_clear();
+    if a.volume.is_some() {
+        // 分割後原檔已不存在，列出各個分割檔
+        let parts: Vec<PathBuf> = (1..).map(|n| PathBuf::from(format!("{}.{n:03}", archive.display()))).take_while(|p| p.is_file()).collect();
+        let total: u64 = parts.iter().filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum();
+        println!("已分割為 {} 個檔案（{}）：{} …\n一切正常", parts.len(), format_size(total), parts[0].display());
+        return Ok(());
+    }
     let size = std::fs::metadata(&archive)?.len();
     println!("壓縮檔大小：{}\n一切正常", format_size(size));
     Ok(())
@@ -365,7 +382,7 @@ fn cmd_delete(a: &Args) -> anyhow::Result<()> {
     };
     println!("正在從 {} 刪除 {} 個項目", archive.display(), a.files.len());
     let bar = Bar::new(a.no_progress);
-    let opts = CompressOptions { level: a.level, password, encrypt_names: false };
+    let opts = CompressOptions { level: a.level, password, encrypt_names: false, volume_size: None };
     ziptool_core::update(archive, &[], "", &a.files, &opts, &bar)?;
     bar.0.finish_and_clear();
     println!("一切正常");

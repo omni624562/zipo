@@ -270,20 +270,29 @@ fn run(task: Task, s: &Shared) -> Result<Outcome, Error> {
     match task {
         Task::Compress { inputs, output, format, opts, then } => {
             ziptool_core::compress(&inputs, &output, format, &opts, s)?;
-            let size = std::fs::metadata(&output).map(|m| m.len()).unwrap_or(0);
+            // 分割時原檔已切成 名稱.001、名稱.002…
+            let parts: Vec<PathBuf> = if opts.volume_size.is_some() {
+                (1..).map(|n| PathBuf::from(format!("{}.{n:03}", output.display()))).take_while(|p| p.is_file()).collect()
+            } else {
+                vec![output.clone()]
+            };
+            let size: u64 = parts.iter().filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum();
             let total: u64 = s.total.load(Ordering::Relaxed);
             let ratio = if total > 0 { size as f64 * 100.0 / total as f64 } else { 0.0 };
             let mut message = format!(
                 "{}\n\n原始大小：{}\n壓縮後：{}（{ratio:.0}%）\n耗時：{:.1} 秒",
-                output.display(),
+                parts.first().unwrap_or(&output).display(),
                 human(total),
                 human(size),
                 started.elapsed().as_secs_f32()
             );
+            if parts.len() > 1 || opts.volume_size.is_some() {
+                message += &format!("\n分割為 {} 個檔案；解壓縮時開啟 .001 即可", parts.len());
+            }
             if then.recycle {
                 // 先確認壓縮檔完整，才移除原始檔
                 *lock(&s.stage) = "正在檢查壓縮檔".into();
-                message += &match ziptool_core::test(&output, opts.password.as_deref(), &ziptool_core::NoProgress) {
+                message += &match ziptool_core::test(parts.first().unwrap_or(&output), opts.password.as_deref(), &ziptool_core::NoProgress) {
                     Ok(_) => match send_to_recycle_bin(&inputs) {
                         Ok(()) => "\n\n原始檔已移到資源回收筒。".to_string(),
                         Err(e) => format!("\n\n原始檔無法移到資源回收筒：{e}"),
