@@ -771,8 +771,23 @@ impl App {
     }
 
     /// 目前位於壓縮檔內的壓縮檔（暫存的副本，唯讀）
+    #[cfg(test)]
     fn in_nested(&self) -> bool {
         matches!(&self.loc, Location::Archive { path, .. } if self.is_nested(path))
+    }
+
+    /// 目前的壓縮檔不能修改的原因：壓縮檔內的壓縮檔、ISO 映像檔、分割的壓縮檔
+    fn read_only_reason(&self) -> Option<&'static str> {
+        let Location::Archive { path, .. } = &self.loc else { return None };
+        if self.is_nested(path) {
+            Some(NESTED_READ_ONLY)
+        } else if ziptool_core::is_first_volume(path) {
+            Some("分割的壓縮檔無法直接修改。若要修改，請先解壓縮，再重新壓縮。")
+        } else if Format::from_file_name(&file_name(path)).is_some_and(|f| f.is_read_only()) {
+            Some("ISO 映像檔只能瀏覽與解壓縮，無法修改。")
+        } else {
+            None
+        }
     }
 
     fn is_nested(&self, path: &Path) -> bool {
@@ -1002,8 +1017,8 @@ impl App {
     /// 在壓縮檔內加入檔案（加到目前瀏覽的資料夾）。
     fn confirm_add_into_archive(&mut self, files: Vec<PathBuf>) {
         let Location::Archive { path, inner } = self.loc.clone() else { return };
-        if self.in_nested() {
-            return self.notice("加入", NESTED_READ_ONLY);
+        if let Some(why) = self.read_only_reason() {
+            return self.notice("加入", why);
         }
         if Format::detect(&path).is_ok_and(|f| f.is_single()) {
             return self.notice("加入", "這種格式只能包含單一檔案，無法再加入其他檔案。");
@@ -1021,8 +1036,8 @@ impl App {
         let Location::Archive { path, .. } = self.loc.clone() else {
             return self.notice("刪除", "刪除只能用在壓縮檔內的項目。Zipo 不會刪除你電腦上的檔案。");
         };
-        if self.in_nested() {
-            return self.notice("刪除", NESTED_READ_ONLY);
+        if let Some(why) = self.read_only_reason() {
+            return self.notice("刪除", why);
         }
         let remove: Vec<String> = self.selected_rows().iter().map(|r| self.inner_name(r)).collect();
         if remove.is_empty() {
@@ -1572,7 +1587,7 @@ impl App {
         let has_sel = !rows.is_empty();
         let has_archive = rows.iter().any(|r| r.is_archive);
         let selectable = rows.iter().any(|r| !r.is_drive);
-        let nested = self.in_nested();
+        let nested = self.read_only_reason().is_some();
         ToolbarState {
             in_archive,
             compress: (in_archive && !nested) || (!in_archive && selectable),
@@ -1799,7 +1814,7 @@ impl App {
             return;
         }
         let in_archive = matches!(self.loc, Location::Archive { .. });
-        let nested = self.in_nested();
+        let nested = self.read_only_reason().is_some();
         let mut click: Option<(usize, Modifiers)> = None;
         let mut double: Option<usize> = None;
         let mut ctx_action: Option<Action> = None;
@@ -4091,5 +4106,32 @@ mod nested_tests {
         wait(&mut app, &ctx);
         assert_eq!(app.loc, Location::Archive { path: outer, inner: "docs".into() });
         assert!(!app.in_nested());
+    }
+}
+
+#[cfg(test)]
+mod read_only_tests {
+    use super::*;
+
+    /// ISO 與分割的壓縮檔在圖形介面中也是唯讀，並說明原因
+    #[test]
+    fn iso_and_split_archives_are_read_only() {
+        let t = tempfile::tempdir().unwrap();
+        let root = real_path(t.path());
+        std::fs::write(root.join("a.txt"), "a").unwrap();
+        let opts = ziptool_core::CompressOptions { volume_size: Some(1 << 20), ..Default::default() };
+        ziptool_core::compress(&[root.join("a.txt")], &root.join("v.zip"), Format::Zip, &opts, &ziptool_core::NoProgress).unwrap();
+        let mut app = App::new(Some(root.clone()));
+        for (path, word) in [(root.join("v.zip.001"), "分割"), (root.join("disc.iso"), "ISO")] {
+            app.loc = Location::Archive { path, inner: String::new() };
+            let st = app.toolbar_state();
+            assert!(!st.delete && !st.compress, "{word}");
+            app.cmd_delete();
+            assert!(matches!(&app.dialog, Some(Dialog::Notice { message, .. }) if message.contains(word)), "{word}");
+            app.dialog = None;
+        }
+        // 一般的壓縮檔可以修改
+        app.loc = Location::Archive { path: root.join("x.zip"), inner: String::new() };
+        assert!(app.read_only_reason().is_none());
     }
 }

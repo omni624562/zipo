@@ -1043,3 +1043,111 @@ fn split_volumes_keep_mark_of_the_web() {
     got.push(":Zone.Identifier");
     assert!(fs::read_to_string(got).unwrap().contains("ZoneId=3"));
 }
+
+/// 建立測試用 ISO（Joliet：中文檔名與子資料夾）
+fn make_iso(path: &Path) {
+    use hadris_iso::joliet::JolietLevel;
+    use hadris_iso::read::PathSeparator;
+    use hadris_iso::write::options::{CreationFeatures, IsoFormatOptions};
+    use hadris_iso::write::{File as IsoFile, InputFiles, IsoImageWriter};
+    use std::sync::Arc;
+    let big: Vec<u8> = (0..300_000u32).map(|i| (i * 7 % 251) as u8).collect();
+    let files = InputFiles {
+        path_separator: PathSeparator::ForwardSlash,
+        files: vec![
+            IsoFile::File { name: Arc::new("說明.txt".into()), contents: "光碟說明".as_bytes().to_vec() },
+            IsoFile::Directory {
+                name: Arc::new("資料".into()),
+                children: vec![
+                    IsoFile::File { name: Arc::new("big.bin".into()), contents: big },
+                    IsoFile::Directory { name: Arc::new("sub".into()), children: vec![IsoFile::File { name: Arc::new("深層.txt".into()), contents: b"deep".to_vec() }] },
+                ],
+            },
+        ],
+    };
+    let options = IsoFormatOptions {
+        volume_name: "TEST".into(),
+        system_id: None,
+        volume_set_id: None,
+        publisher_id: None,
+        preparer_id: None,
+        application_id: None,
+        sector_size: 2048,
+        path_separator: PathSeparator::ForwardSlash,
+        features: CreationFeatures { joliet: Some(JolietLevel::Level3), ..Default::default() },
+        strict_charset: false,
+    };
+    let mut buf = std::io::Cursor::new(vec![0u8; 0]);
+    IsoImageWriter::create(&mut buf, files, options).unwrap();
+    fs::write(path, buf.into_inner()).unwrap();
+}
+
+/// ISO：列出、解壓縮、測試（中文檔名、子資料夾、較大的檔案）；不可建立或修改
+#[test]
+fn iso_read_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let iso = tmp.path().join("disc.iso");
+    make_iso(&iso);
+    assert_eq!(Format::detect(&iso).unwrap(), Format::Iso);
+    // 沒有副檔名時以檔頭辨識
+    let noext = tmp.path().join("disc");
+    fs::copy(&iso, &noext).unwrap();
+    assert_eq!(Format::detect(&noext).unwrap(), Format::Iso);
+
+    let mut names: Vec<(String, bool)> = list(&iso, None).unwrap().into_iter().map(|e| (e.name, e.is_dir)).collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            ("說明.txt".to_string(), false),
+            ("資料".to_string(), true),
+            ("資料/big.bin".to_string(), false),
+            ("資料/sub".to_string(), true),
+            ("資料/sub/深層.txt".to_string(), false),
+        ]
+    );
+    let out = tmp.path().join("out");
+    let r = extract(&iso, &out, &ExtractOptions::default(), &NoProgress).unwrap();
+    assert_eq!(r.files, 3);
+    assert_eq!(fs::read_to_string(out.join("說明.txt")).unwrap(), "光碟說明");
+    assert_eq!(fs::read_to_string(out.join("資料/sub/深層.txt")).unwrap(), "deep");
+    assert_eq!(fs::read(out.join("資料/big.bin")).unwrap().len(), 300_000);
+    assert_eq!(test(&iso, None, &NoProgress).unwrap().files, 3);
+
+    // 只解出選取的項目
+    let opts = ExtractOptions { selection: Some(vec!["資料/sub".into()]), strip_prefix: "資料".into(), ..Default::default() };
+    let out2 = tmp.path().join("out2");
+    extract(&iso, &out2, &opts, &NoProgress).unwrap();
+    assert!(out2.join("sub/深層.txt").is_file() && !out2.join("說明.txt").exists());
+
+    // 只能讀取
+    let src = make_tree(tmp.path());
+    assert!(compress(&[src], &tmp.path().join("x.iso"), Format::Iso, &CompressOptions::default(), &NoProgress).is_err());
+    assert!(update(&iso, &[], "", &["說明.txt".into()], &CompressOptions::default(), &NoProgress).is_err());
+    assert!(!Format::ALL.contains(&Format::Iso));
+}
+
+/// 損壞的 ISO 不可讓程式當掉
+#[test]
+fn corrupt_iso_does_not_panic() {
+    let tmp = tempfile::tempdir().unwrap();
+    let iso = tmp.path().join("disc.iso");
+    make_iso(&iso);
+    let good = fs::read(&iso).unwrap();
+    let mut x = 99u32;
+    for i in 0..300 {
+        let mut data = good.clone();
+        for _ in 0..8 {
+            x = x.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            // 集中破壞卷描述元與目錄所在的前段
+            let pos = (x as usize >> 4) % data.len().min(64 * 1024);
+            data[pos] = (x >> 24) as u8;
+        }
+        let bad = tmp.path().join(format!("bad{i}.iso"));
+        fs::write(&bad, &data).unwrap();
+        let _ = list(&bad, None);
+        let _ = test(&bad, None, &NoProgress);
+        let _ = extract(&bad, &tmp.path().join(format!("o{i}")), &ExtractOptions::default(), &NoProgress);
+        fs::remove_file(&bad).unwrap();
+    }
+}

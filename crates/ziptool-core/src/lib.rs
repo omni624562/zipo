@@ -3,6 +3,7 @@
 
 mod format;
 mod hash;
+mod iso;
 mod progress;
 mod sevenz;
 mod single;
@@ -184,6 +185,9 @@ pub fn compress(
     {
         return Err(Error::Unsupported(format!("壓縮等級須為 0–9，收到 {l}")));
     }
+    if format.is_read_only() {
+        return Err(Error::Unsupported(format!("{} 只能讀取，無法建立", format.name())));
+    }
     if opts.password.is_some() && !format.supports_password() {
         return Err(Error::Unsupported(format!("{} 格式不支援密碼", format.name())));
     }
@@ -234,6 +238,9 @@ pub fn update(
         return Err(Error::Unsupported("分割的壓縮檔無法直接修改；請先解壓縮，再重新壓縮".into()));
     }
     let format = Format::detect(archive)?;
+    if format.is_read_only() {
+        return Err(Error::Unsupported(format!("{} 只能讀取，無法加入或刪除項目", format.name())));
+    }
     if format.is_single() {
         return Err(Error::Unsupported(format!("{} 只能包含單一檔案，無法加入或刪除項目", format.name())));
     }
@@ -330,6 +337,7 @@ pub fn extract(archive: &Path, dest: &Path, opts: &ExtractOptions, progress: &dy
     let pw = opts.password.as_deref();
     let res = match format {
         Format::Zip => zip_fmt::extract(archive, &plan, pw, progress),
+        Format::Iso => iso::extract(archive, &plan, progress),
         Format::SevenZ => sevenz::extract(archive, &plan, pw, progress),
         f if f.is_tar() => tar_fmt::extract(archive, &plan, f, progress),
         f => single::extract(archive, &plan, f, progress),
@@ -371,6 +379,7 @@ pub fn list(archive: &Path, password: Option<&str>) -> Result<Vec<Entry>> {
     let archive = joined.as_ref().map_or(archive, |j| j.path.as_path());
     let mut entries = match Format::detect(archive)? {
         Format::Zip => zip_fmt::list(archive)?,
+        Format::Iso => iso::list(archive)?,
         Format::SevenZ => sevenz::list(archive, password)?,
         f if f.is_tar() => tar_fmt::list(archive, f)?,
         f => single::list(archive, f)?,
@@ -388,6 +397,7 @@ pub fn test(archive: &Path, password: Option<&str>, progress: &dyn Progress) -> 
     let archive = joined.as_ref().map_or(archive, |j| j.path.as_path());
     let res = match Format::detect(archive)? {
         Format::Zip => zip_fmt::test(archive, password, progress),
+        Format::Iso => iso::test(archive, progress),
         Format::SevenZ => sevenz::test(archive, password, progress),
         f if f.is_tar() => tar_fmt::test(archive, f, progress),
         f => single::test(archive, f, progress),

@@ -17,9 +17,12 @@ pub enum Format {
     Bz2,
     Xz,
     Zst,
+    /// ISO 映像檔（只能讀取，不在 `ALL` 中）
+    Iso,
 }
 
 impl Format {
+    /// 可以建立的壓縮格式（ISO 只能讀取，不包含在內）
     pub const ALL: [Format; 11] = [
         Format::Zip,
         Format::SevenZ,
@@ -47,6 +50,7 @@ impl Format {
             Format::Bz2 => "bz2",
             Format::Xz => "xz",
             Format::Zst => "zst",
+            Format::Iso => "iso",
         }
     }
 
@@ -67,7 +71,7 @@ impl Format {
             return Self::split_extension(first);
         }
         let n = name.to_ascii_lowercase();
-        let table: [(&str, Format); 17] = [
+        let table: [(&str, Format); 18] = [
             (".tar.gz", Format::TarGz),
             (".tgz", Format::TarGz),
             (".tar.bz2", Format::TarBz2),
@@ -85,6 +89,7 @@ impl Format {
             (".xz", Format::Xz),
             (".zst", Format::Zst),
             (".zstd", Format::Zst),
+            (".iso", Format::Iso),
         ];
         table
             .iter()
@@ -115,6 +120,8 @@ impl Format {
             Format::Zst
         } else if n >= 262 && &b[257..262] == b"ustar" {
             Format::Tar
+        } else if is_iso(&mut file)? {
+            Format::Iso
         } else {
             return Err(Error::UnknownFormat(path.display().to_string()));
         };
@@ -133,6 +140,11 @@ impl Format {
         matches!(self, Format::Gz | Format::Bz2 | Format::Xz | Format::Zst)
     }
 
+    /// 只能讀取（無法建立或修改）
+    pub fn is_read_only(self) -> bool {
+        self == Format::Iso
+    }
+
     pub fn supports_password(self) -> bool {
         matches!(self, Format::Zip | Format::SevenZ)
     }
@@ -141,6 +153,16 @@ impl Format {
     pub fn extension(self) -> &'static str {
         self.name()
     }
+}
+
+/// ISO 9660：第 16 個磁區（0x8000）開始的卷描述元以「CD001」標示
+fn is_iso(file: &mut File) -> std::io::Result<bool> {
+    use std::io::{Seek, SeekFrom};
+    let mut buf = [0u8; 6];
+    if file.seek(SeekFrom::Start(0x8000)).is_err() {
+        return Ok(false);
+    }
+    Ok(read_up_to(file, &mut buf)? == 6 && &buf[1..6] == b"CD001")
 }
 
 fn read_up_to(r: &mut impl Read, buf: &mut [u8]) -> std::io::Result<usize> {

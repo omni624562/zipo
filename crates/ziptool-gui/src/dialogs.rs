@@ -175,6 +175,8 @@ impl AddDialog {
                     Format::TarBz2 | Format::Bz2 => "BZip2",
                     Format::TarXz | Format::Xz => "LZMA2 (xz)",
                     Format::TarZst | Format::Zst => "Zstandard",
+                    // 只能讀取，不會出現在可選的格式中
+                    Format::Iso => "—",
                 };
                 ui.label(RichText::new(method).color(p.text));
                 ui.end_row();

@@ -523,6 +523,7 @@ fn cmd_info() {
         let pw = if f.supports_password() { "AES-256" } else { "" };
         println!("{:<11} {:<26} 是    是      {pw}", f.name(), exts);
     }
+    println!("{:<11} {:<26} 否    是      （ISO 9660、Joliet；不支援只用 UDF 的映像檔）", "iso", "iso");
 }
 
 fn main() -> ExitCode {
