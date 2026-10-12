@@ -2600,6 +2600,36 @@ mod update_tests {
         assert!(all.contains(&"proj/docs/new.txt".to_string()), "{all:?}");
     }
 
+    /// 加入檔案到加密的 zip：先要求密碼，輸入後新檔案也加密
+    #[test]
+    fn add_into_encrypted_zip_asks_for_password() {
+        let t = tempfile::tempdir().unwrap();
+        let root = real_path(t.path());
+        std::fs::write(root.join("old.txt"), "old").unwrap();
+        let ar = root.join("e.zip");
+        let enc = ziptool_core::CompressOptions { password: Some("pw".into()), ..Default::default() };
+        ziptool_core::compress(&[root.join("old.txt")], &ar, Format::Zip, &enc, &ziptool_core::NoProgress).unwrap();
+
+        let ctx = egui::Context::default();
+        let mut app = App::new(Some(ar.clone()));
+        load(&mut app, &ctx);
+        let extra = root.join("new.txt");
+        std::fs::write(&extra, "n").unwrap();
+        app.confirm_add_into_archive(vec![extra]);
+        let Some(Dialog::ConfirmUpdate { task, .. }) = app.dialog.take() else { panic!("應出現確認對話框") };
+        app.spawn(task);
+        load(&mut app, &ctx);
+        let Some(Dialog::Password(mut d)) = app.dialog.take() else { panic!("應要求輸入密碼") };
+        let purpose = std::mem::replace(&mut d.purpose, PasswordPurpose::Open { path: PathBuf::new(), inner: String::new() });
+        let PasswordPurpose::Retry(mut task) = purpose else { panic!("應為重試") };
+        task.set_password("pw".into());
+        app.spawn(task);
+        load(&mut app, &ctx);
+        let entries = ziptool_core::list(&ar, None).unwrap();
+        assert!(entries.iter().any(|e| e.name == "new.txt"), "{entries:?}");
+        assert!(entries.iter().all(|e| e.encrypted), "{entries:?}");
+    }
+
     #[test]
     fn delete_outside_archive_never_touches_disk() {
         let t = tempfile::tempdir().unwrap();

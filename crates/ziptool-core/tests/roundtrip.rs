@@ -713,19 +713,33 @@ fn update_add_replace_remove() {
 }
 
 #[test]
-fn update_zip_keeps_encrypted_entries_without_password() {
+fn update_encrypted_zip_requires_the_same_password() {
     let tmp = tempfile::tempdir().unwrap();
     let (src, ar) = archive_of(tmp.path(), Format::Zip, &CompressOptions { password: Some("pw".into()), ..Default::default() });
+    let before = fs::read(&ar).unwrap();
     let new = tmp.path().join("plain.txt");
-    fs::write(&new, "未加密").unwrap();
-    // 不提供密碼也能更新：原有項目直接複製
-    update(&ar, &[new], "", &[], &Default::default(), &NoProgress).unwrap();
+    fs::write(&new, "新檔案").unwrap();
+    // 加入檔案：沒有密碼或密碼不同時拒絕，避免新檔案沒有加密或混用不同密碼；壓縮檔維持原狀
+    let r = update(&ar, std::slice::from_ref(&new), "", &[], &Default::default(), &NoProgress);
+    assert!(matches!(r, Err(Error::PasswordRequired)), "{r:?}");
+    let wrong = CompressOptions { password: Some("other".into()), ..Default::default() };
+    let r = update(&ar, std::slice::from_ref(&new), "", &[], &wrong, &NoProgress);
+    assert!(matches!(r, Err(Error::WrongPassword)), "{r:?}");
+    assert_eq!(fs::read(&ar).unwrap(), before);
+
+    // 密碼正確：新檔案也加密
+    let right = CompressOptions { password: Some("pw".into()), ..Default::default() };
+    update(&ar, &[new], "", &[], &right, &NoProgress).unwrap();
     let entries = list(&ar, None).unwrap();
-    assert!(entries.iter().find(|e| e.name == "src/a.txt").unwrap().encrypted);
-    assert!(!entries.iter().find(|e| e.name == "plain.txt").unwrap().encrypted);
+    assert!(entries.iter().all(|e| e.is_dir || e.encrypted), "{entries:?}");
     let out = tmp.path().join("out");
     x(&ar, &out, Some("pw")).unwrap();
     assert_eq!(fs::read(out.join("src/a.txt")).unwrap(), fs::read(src.join("a.txt")).unwrap());
+    assert_eq!(fs::read_to_string(out.join("plain.txt")).unwrap(), "新檔案");
+
+    // 只刪除項目不需要密碼（不會產生新的項目）
+    update(&ar, &[], "", &["plain.txt".into()], &Default::default(), &NoProgress).unwrap();
+    assert!(list(&ar, None).unwrap().iter().all(|e| e.name != "plain.txt"));
 }
 
 #[test]

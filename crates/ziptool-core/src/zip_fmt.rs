@@ -28,6 +28,9 @@ pub(crate) fn update(
     progress: &dyn Progress,
 ) -> Result<()> {
     let mut src = open(archive)?;
+    if !items.is_empty() {
+        check_password_for_new_entries(&mut src, opts.password.as_deref())?;
+    }
     let mut zip = ZipWriter::new(BufWriter::new(File::create(output)?));
     for i in 0..src.len() {
         let f = src.by_index_raw(i)?;
@@ -40,6 +43,24 @@ pub(crate) fn update(
     }
     write_items(&mut zip, items, opts, progress)?;
     zip.finish()?.flush()?;
+    Ok(())
+}
+
+/// 壓縮檔已有加密項目時，加入的新檔案必須用同一個密碼加密：
+/// 否則新檔案會以未加密的方式加入（使用者通常不會察覺），或同一個壓縮檔混用不同密碼。
+/// 以最小的加密項目完整解密一次（含 CRC 檢查）來確認密碼；舊式 ZipCrypto 的密碼檢查碼只有 1 位元組，不夠可靠。
+fn check_password_for_new_entries(src: &mut ZipArchive<BufReader<File>>, password: Option<&str>) -> Result<()> {
+    let mut smallest: Option<(usize, u64)> = None;
+    for i in 0..src.len() {
+        let f = src.by_index_raw(i)?;
+        if f.encrypted() && smallest.is_none_or(|(_, size)| f.compressed_size() < size) {
+            smallest = Some((i, f.compressed_size()));
+        }
+    }
+    let Some((i, _)) = smallest else { return Ok(()) };
+    let pw = password.ok_or(Error::PasswordRequired)?;
+    let mut f = src.by_index_decrypt(i, pw.as_bytes()).map_err(map_err)?;
+    io::copy(&mut f, &mut io::sink()).map_err(|_| Error::WrongPassword)?;
     Ok(())
 }
 
