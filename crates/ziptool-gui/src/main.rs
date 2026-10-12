@@ -340,6 +340,14 @@ enum PreviewState {
     Ready(preview::Content),
 }
 
+/// 壓縮檔內的壓縮檔：解到暫存資料夾後瀏覽（唯讀）
+struct Nested {
+    /// 暫存資料夾中的壓縮檔
+    path: PathBuf,
+    /// 開啟它的位置（外層壓縮檔內的資料夾），「上一層」回到這裡
+    parent: Location,
+}
+
 /// 從壓縮檔內開啟的檔案：在其他程式中修改並儲存後，詢問是否存回壓縮檔
 struct Watched {
     archive: PathBuf,
@@ -458,6 +466,8 @@ struct App {
     open_after: bool,
     /// 從壓縮檔內開啟、需要偵測修改的檔案
     watched: Vec<Watched>,
+    /// 已開啟的壓縮檔內的壓縮檔
+    nested: Vec<Nested>,
     /// 顯示預覽窗格（檢視 › 預覽窗格，Alt+P）
     preview_open: bool,
     preview: Option<Preview>,
@@ -513,6 +523,7 @@ impl App {
             watched: Vec::new(),
             preview_open: false,
             preview: None,
+            nested: Vec::new(),
             last_watch_check: std::time::Instant::now(),
             #[cfg(debug_assertions)]
             perf: perf::Perf::from_env(),
@@ -735,9 +746,26 @@ impl App {
     }
 
     fn go_up(&mut self) {
+        // 壓縮檔內的壓縮檔：從它的根目錄回到外層壓縮檔
+        if let Location::Archive { path, inner } = &self.loc
+            && inner.is_empty()
+            && let Some(n) = self.nested.iter().find(|n| &n.path == path)
+        {
+            let parent = n.parent.clone();
+            return self.navigate(parent);
+        }
         if let Some(parent) = self.loc.parent() {
             self.navigate(parent);
         }
+    }
+
+    /// 目前位於壓縮檔內的壓縮檔（暫存的副本，唯讀）
+    fn in_nested(&self) -> bool {
+        matches!(&self.loc, Location::Archive { path, .. } if self.is_nested(path))
+    }
+
+    fn is_nested(&self, path: &Path) -> bool {
+        self.nested.iter().any(|n| n.path == path)
     }
 
     fn go_address(&mut self) {
@@ -801,6 +829,9 @@ impl App {
                 if r.is_dir {
                     let inner = if inner.is_empty() { r.name.clone() } else { format!("{inner}/{}", r.name) };
                     self.navigate(Location::Archive { path, inner });
+                } else if Format::from_file_name(&r.name).is_some() {
+                    let password = self.cache.as_ref().and_then(|c| c.password.clone());
+                    self.spawn(Task::OpenNested { archive: path, entry: self.inner_name(&r), strip: inner, password });
                 } else {
                     let password = self.cache.as_ref().and_then(|c| c.password.clone());
                     let task = Task::OpenInside { archive: path, entry: self.inner_name(&r), strip: inner, password };
@@ -950,6 +981,9 @@ impl App {
     /// 在壓縮檔內加入檔案（加到目前瀏覽的資料夾）。
     fn confirm_add_into_archive(&mut self, files: Vec<PathBuf>) {
         let Location::Archive { path, inner } = self.loc.clone() else { return };
+        if self.in_nested() {
+            return self.notice("加入", NESTED_READ_ONLY);
+        }
         if Format::detect(&path).is_ok_and(|f| f.is_single()) {
             return self.notice("加入", "這種格式只能包含單一檔案，無法再加入其他檔案。");
         }
@@ -966,6 +1000,9 @@ impl App {
         let Location::Archive { path, .. } = self.loc.clone() else {
             return self.notice("刪除", "刪除只能用在壓縮檔內的項目。Zipo 不會刪除你電腦上的檔案。");
         };
+        if self.in_nested() {
+            return self.notice("刪除", NESTED_READ_ONLY);
+        }
         let remove: Vec<String> = self.selected_rows().iter().map(|r| self.inner_name(r)).collect();
         if remove.is_empty() {
             return self.notice("刪除", "請先選取要從壓縮檔刪除的項目。");
@@ -1195,7 +1232,8 @@ impl App {
     /// 開始偵測從壓縮檔內開啟的檔案。解出的檔名與項目名稱不同時（名稱被清理過）不偵測，避免存回成另一個項目
     fn watch(&mut self, archive: PathBuf, entry: String, file: PathBuf, password: Option<String>) {
         let base = entry.rsplit('/').next().unwrap_or(&entry);
-        if file_name(&file) != base {
+        // 壓縮檔內的壓縮檔是暫存副本，存回也不會改到外層，所以不偵測
+        if file_name(&file) != base || self.is_nested(&archive) {
             return;
         }
         self.watched.retain(|w| w.file != file);
@@ -1305,6 +1343,13 @@ impl App {
             {
                 self.watch(archive.clone(), entry.clone(), file.clone(), password.clone());
             }
+            if let (Task::OpenNested { archive, strip, .. }, Ok(out)) = (&task, &res)
+                && let Some(file) = &out.opened
+            {
+                let parent = Location::Archive { path: archive.clone(), inner: strip.clone() };
+                self.nested.push(Nested { path: file.clone(), parent });
+                self.navigate(Location::Archive { path: file.clone(), inner: String::new() });
+            }
             if ctx.input(|i| i.viewport().focused) == Some(false) {
                 ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
             }
@@ -1337,7 +1382,7 @@ impl App {
                 Err(e @ (Error::PasswordRequired | Error::WrongPassword)) => {
                     let name = match &task {
                         Task::Extract { archives, .. } | Task::Test { archives, .. } => file_name(&archives[0]),
-                        Task::OpenInside { archive, .. } => file_name(archive),
+                        Task::OpenInside { archive, .. } | Task::OpenNested { archive, .. } => file_name(archive),
                         Task::Compress { output, .. } => file_name(output),
                         Task::Update { archive, .. } | Task::HashInside { archive, .. } => file_name(archive),
                         Task::Hash { inputs } => inputs.first().map(|p| file_name(p)).unwrap_or_default(),
@@ -1499,13 +1544,14 @@ impl App {
         let has_sel = !rows.is_empty();
         let has_archive = rows.iter().any(|r| r.is_archive);
         let selectable = rows.iter().any(|r| !r.is_drive);
+        let nested = self.in_nested();
         ToolbarState {
             in_archive,
-            compress: in_archive || selectable,
+            compress: (in_archive && !nested) || (!in_archive && selectable),
             extract: in_archive || has_archive,
             test: in_archive || has_archive,
             info: has_sel || in_archive,
-            delete: in_archive && has_sel,
+            delete: in_archive && has_sel && !nested,
         }
     }
 
@@ -1573,11 +1619,19 @@ impl App {
             }
             out
         }
-        match &self.loc {
+        self.crumbs_for(&self.loc, &dir_parts)
+    }
+
+    fn crumbs_for(&self, loc: &Location, dir_parts: &dyn Fn(&Path) -> Vec<(String, Location)>) -> Vec<(String, Location)> {
+        match loc {
             Location::Computer => vec![("本機".into(), Location::Computer)],
             Location::Dir(d) => dir_parts(d),
             Location::Archive { path, inner } => {
-                let mut out = path.parent().map(dir_parts).unwrap_or_default();
+                // 壓縮檔內的壓縮檔：接在外層壓縮檔的路徑之後，不顯示暫存資料夾
+                let mut out = match self.nested.iter().find(|n| &n.path == path) {
+                    Some(n) => self.crumbs_for(&n.parent, dir_parts),
+                    None => path.parent().map(dir_parts).unwrap_or_default(),
+                };
                 out.push((file_name(path), Location::Archive { path: path.clone(), inner: String::new() }));
                 let mut acc = String::new();
                 for part in inner.split('/').filter(|p| !p.is_empty()) {
@@ -1717,6 +1771,7 @@ impl App {
             return;
         }
         let in_archive = matches!(self.loc, Location::Archive { .. });
+        let nested = self.in_nested();
         let mut click: Option<(usize, Modifiers)> = None;
         let mut double: Option<usize> = None;
         let mut ctx_action: Option<Action> = None;
@@ -1835,7 +1890,7 @@ impl App {
                         if (in_archive || is_archive_file) && ui.button(format!("{}  測試", icon::SEAL_CHECK)).clicked() {
                             ctx_action = Some(Action::Test);
                         }
-                        if in_archive && ui.button(format!("{}  從壓縮檔刪除", icon::TRASH)).clicked() {
+                        if in_archive && !nested && ui.button(format!("{}  從壓縮檔刪除", icon::TRASH)).clicked() {
                             ctx_action = Some(Action::Delete);
                         }
                         if !r.is_drive && ui.button(format!("{}  計算雜湊值", icon::FINGERPRINT)).clicked() {
@@ -2457,6 +2512,8 @@ fn preview_inside(archive: &Path, entry: &str, strip: &str, password: Option<Str
     let _ = std::fs::remove_dir_all(&dir);
     content
 }
+
+const NESTED_READ_ONLY: &str = "這是壓縮檔內的壓縮檔（暫存的副本），只能瀏覽、解壓縮，無法直接修改。若要修改，請先把它解壓縮出來。";
 
 /// 拖曳到程式外時先解壓縮的大小上限（解壓縮期間畫面會停住）
 const DRAG_OUT_MAX: u64 = 256 << 20;
@@ -3904,5 +3961,70 @@ mod preview_tests {
         let mut app = App::new(Some(root));
         app.preview_open = true;
         assert!(matches!(preview_of(&mut app, &ctx, "a.md"), preview::Content::Text { text, .. } if text == "# 標題"));
+    }
+}
+
+#[cfg(test)]
+mod nested_tests {
+    use super::*;
+
+    fn wait(app: &mut App, ctx: &egui::Context) {
+        for _ in 0..800 {
+            app.poll(ctx);
+            if app.loading.is_none() && app.job.is_none() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("逾時");
+    }
+
+    #[test]
+    fn browse_archive_inside_archive() {
+        let t = tempfile::tempdir().unwrap();
+        let root = real_path(t.path());
+        // inner.zip：x/y.txt
+        std::fs::create_dir_all(root.join("in/x")).unwrap();
+        std::fs::write(root.join("in/x/y.txt"), "abc").unwrap();
+        std::fs::create_dir_all(root.join("out/docs")).unwrap();
+        let none = &ziptool_core::NoProgress;
+        ziptool_core::compress(&[root.join("in/x")], &root.join("out/docs/inner.zip"), Format::Zip, &Default::default(), none).unwrap();
+        let outer = root.join("outer.zip");
+        ziptool_core::compress(&[root.join("out/docs")], &outer, Format::Zip, &Default::default(), none).unwrap();
+
+        let ctx = egui::Context::default();
+        let mut app = App::new(Some(outer.clone()));
+        wait(&mut app, &ctx);
+        app.navigate(Location::Archive { path: outer.clone(), inner: "docs".into() });
+        app.open_row(0);
+        wait(&mut app, &ctx);
+        assert!(app.in_nested(), "應進入內層壓縮檔：{:?}", app.loc);
+        assert_eq!(app.rows.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["x"]);
+
+        // 網址列：外層 › docs › inner.zip，不顯示暫存資料夾
+        let labels: Vec<String> = app.breadcrumbs().into_iter().map(|c| c.0).collect();
+        assert_eq!(&labels[labels.len() - 3..], ["outer.zip", "docs", "inner.zip"], "{labels:?}");
+        assert!(!labels.iter().any(|l| l == "Zipo"), "{labels:?}");
+
+        // 唯讀：不能加入或刪除；可以讀取內容
+        let st = app.toolbar_state();
+        assert!(!st.delete && !st.compress && st.extract);
+        app.sel = [0].into();
+        app.cmd_delete();
+        assert!(matches!(&app.dialog, Some(Dialog::Notice { message, .. }) if message == NESTED_READ_ONLY));
+        app.dialog = None;
+        app.confirm_add_into_archive(vec![root.join("outer.zip")]);
+        assert!(matches!(&app.dialog, Some(Dialog::Notice { message, .. }) if message == NESTED_READ_ONLY));
+        app.dialog = None;
+        app.cmd_hash();
+        wait(&mut app, &ctx);
+        assert!(matches!(&app.dialog, Some(Dialog::Hashes { rows, .. }) if rows[0].1.md5 == "900150983cd24fb0d6963f7d28e17f72"));
+        app.dialog = None;
+
+        // 上一層：回到外層壓縮檔的 docs
+        app.go_up();
+        wait(&mut app, &ctx);
+        assert_eq!(app.loc, Location::Archive { path: outer, inner: "docs".into() });
+        assert!(!app.in_nested());
     }
 }

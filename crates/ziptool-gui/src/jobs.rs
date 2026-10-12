@@ -30,6 +30,8 @@ pub enum Task {
     Update { archive: PathBuf, add: Vec<PathBuf>, into: String, remove: Vec<String>, password: Option<String> },
     /// 把壓縮檔內的單一檔案解到暫存資料夾後，用系統預設程式開啟。
     OpenInside { archive: PathBuf, entry: String, strip: String, password: Option<String> },
+    /// 把壓縮檔內的壓縮檔解到暫存資料夾，以便直接瀏覽
+    OpenNested { archive: PathBuf, entry: String, strip: String, password: Option<String> },
     /// 計算檔案（資料夾則為其中每個檔案）的雜湊值
     Hash { inputs: Vec<PathBuf> },
     /// 計算壓縮檔內項目的雜湊值：先解到暫存資料夾
@@ -42,7 +44,7 @@ impl Task {
             Task::Compress { .. } => "正在壓縮",
             Task::Extract { .. } => "正在解壓縮",
             Task::Test { .. } => "正在測試",
-            Task::OpenInside { .. } => "正在開啟",
+            Task::OpenInside { .. } | Task::OpenNested { .. } => "正在開啟",
             Task::Update { .. } => "正在更新壓縮檔",
             Task::Hash { .. } | Task::HashInside { .. } => "正在計算雜湊值",
         }
@@ -54,7 +56,8 @@ impl Task {
             Task::Test { password, .. }
             | Task::OpenInside { password, .. }
             | Task::Update { password, .. }
-            | Task::HashInside { password, .. } => *password = Some(pw),
+            | Task::HashInside { password, .. }
+            | Task::OpenNested { password, .. } => *password = Some(pw),
             Task::Compress { .. } | Task::Hash { .. } => {}
         }
     }
@@ -389,6 +392,17 @@ fn run(task: Task, s: &Shared) -> Result<Outcome, Error> {
             })();
             let _ = std::fs::remove_dir_all(&dir);
             Ok(Outcome { hashes: r?, ..Default::default() })
+        }
+        Task::OpenNested { archive, entry, strip, password } => {
+            let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+            let dir = std::env::temp_dir().join("Zipo").join(format!("{}-nested-{stamp}", std::process::id()));
+            let opts = ExtractOptions { password, selection: Some(vec![entry.clone()]), strip_prefix: strip, ..Default::default() };
+            let r = ziptool_core::extract(&archive, &dir, &opts, s)?;
+            if let Some(i) = r.issues.first() {
+                return Err(Error::Unsupported(format!("無法開啟 {}：{}", i.name, i.reason)));
+            }
+            let file = extracted_file(&dir).ok_or_else(|| Error::Unsupported(format!("無法開啟 {entry}")))?;
+            Ok(Outcome { opened: Some(file), ..Default::default() })
         }
         Task::OpenInside { archive, entry, strip, password } => {
             let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
