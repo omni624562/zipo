@@ -591,7 +591,12 @@ impl App {
         app.auto_update = get("auto_update").as_deref() != Some("0");
         app.open_after = get("open_after").as_deref() == Some("1");
         app.preview_open = get("preview").as_deref() == Some("1");
-        app.language = Language::from_key(get("language").as_deref().unwrap_or("auto"));
+        // 沒有語言設定：從舊版升級（已有其他設定）時維持中文，避免更新後介面突然變成英文；全新安裝才依系統語言
+        app.language = match get("language") {
+            Some(k) => Language::from_key(&k),
+            None if get("sort_key").is_some() => Language::Chinese,
+            None => Language::Auto,
+        };
         app.last_update_check = get("last_update_check").and_then(|v| v.parse().ok()).unwrap_or(0);
         if let Some(k) = get("sort_key") {
             app.sort_key = match k.as_str() {
@@ -4207,6 +4212,31 @@ mod english_tests {
 
     fn has_chinese(s: &str) -> bool {
         s.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c) || ('\u{3000}'..='\u{303f}').contains(&c) || ('\u{ff00}'..='\u{ffef}').contains(&c))
+    }
+
+    /// 從舊版升級（已有設定、沒有語言設定）維持中文；全新安裝依系統；明確選擇的語言照用
+    #[test]
+    fn language_default_keeps_existing_users_in_chinese() {
+        #[derive(Default)]
+        struct Mem(std::collections::HashMap<String, String>);
+        impl eframe::Storage for Mem {
+            fn get_string(&self, key: &str) -> Option<String> {
+                self.0.get(key).cloned()
+            }
+            fn set_string(&mut self, key: &str, value: String) {
+                self.0.insert(key.into(), value);
+            }
+            fn remove_string(&mut self, key: &str) {
+                self.0.remove(key);
+            }
+            fn flush(&mut self) {}
+        }
+        let mut old = Mem::default();
+        eframe::Storage::set_string(&mut old, "sort_key", "name".into());
+        assert_eq!(App::with_storage(None, Some(&old)).language, Language::Chinese);
+        assert_eq!(App::with_storage(None, Some(&Mem::default())).language, Language::Auto);
+        eframe::Storage::set_string(&mut old, "language", "en".into());
+        assert_eq!(App::with_storage(None, Some(&old)).language, Language::English);
     }
 
     /// 英文介面：訊息、對話框文字與核心程式庫的錯誤都不含中文
