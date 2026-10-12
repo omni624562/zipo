@@ -414,6 +414,8 @@ struct App {
     update_work: Option<UpdateWork>,
     /// 自動檢查找到的新版本，等目前沒有其他對話框或工作時再顯示
     pending_release: Option<update::Release>,
+    /// 要拖曳到程式外的壓縮檔內項目（完整名稱）；畫面處理完後才開始拖曳
+    drag_out: Option<Vec<String>>,
     /// 效能診斷（設定 ZIPTOOL_PERF 時啟用）
     #[cfg(debug_assertions)]
     perf: Option<perf::Perf>,
@@ -460,6 +462,7 @@ impl App {
             last_update_check: 0,
             update_work: None,
             pending_release: None,
+            drag_out: None,
             #[cfg(debug_assertions)]
             perf: perf::Perf::from_env(),
             #[cfg(debug_assertions)]
@@ -753,6 +756,55 @@ impl App {
     }
 
     // ---------- 指令 ----------
+
+    /// 把壓縮檔內的項目拖曳到檔案總管等其他程式：先解到暫存資料夾，再交給 Windows 的拖放（與 7-Zip 相同）。
+    /// 放下後由對方複製檔案；暫存資料夾在程式結束時清除。
+    fn start_drag_out(&mut self, entries: Vec<String>, frame: &eframe::Frame) {
+        if let Some(items) = self.prepare_drag_out(entries) {
+            drag_files(frame, items);
+        }
+    }
+
+    /// 解出要拖曳的項目，回傳暫存資料夾中最上層的檔案與資料夾；無法拖曳時顯示原因並回傳 `None`
+    fn prepare_drag_out(&mut self, entries: Vec<String>) -> Option<Vec<PathBuf>> {
+        let Location::Archive { path, inner } = self.loc.clone() else { return None };
+        // 拖曳前要先解完，太大時畫面會停住太久
+        let size: u64 = self.selected_rows().iter().filter_map(|r| r.size).sum();
+        if size > DRAG_OUT_MAX {
+            self.notice(
+                "項目太大，無法拖曳",
+                format!("拖曳前需要先解壓縮（約 {}）。超過 {} 時請改用「解壓縮」。", ziptool_core::format_size(size), ziptool_core::format_size(DRAG_OUT_MAX)),
+            );
+            return None;
+        }
+        let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+        let dir = std::env::temp_dir().join("Zipo").join(format!("{}-drag-{stamp}", std::process::id()));
+        let password = self.cache.as_ref().and_then(|c| c.password.clone());
+        let opts = ziptool_core::ExtractOptions { password, selection: Some(entries), strip_prefix: inner.clone(), ..Default::default() };
+        match ziptool_core::extract(&path, &dir, &opts, &ziptool_core::NoProgress) {
+            Ok(r) if !r.issues.is_empty() => {
+                let i = &r.issues[0];
+                self.notice("無法拖曳", format!("{}：{}", i.name, i.reason));
+                return None;
+            }
+            Ok(_) => {}
+            Err(e @ (Error::PasswordRequired | Error::WrongPassword)) => {
+                // 輸入密碼後重新讀取壓縮檔，之後再拖曳一次即可
+                self.dialog = Some(Dialog::Password(PasswordDialog::new(
+                    PasswordPurpose::Open { path: path.clone(), inner },
+                    file_name(&path),
+                    matches!(e, Error::WrongPassword),
+                )));
+                return None;
+            }
+            Err(e) => {
+                self.notice("無法拖曳", e.to_string());
+                return None;
+            }
+        }
+        let items: Vec<PathBuf> = std::fs::read_dir(&dir).map(|d| d.flatten().map(|e| e.path()).collect()).unwrap_or_default();
+        (!items.is_empty()).then_some(items)
+    }
 
     /// 啟動時的自動檢查：開啟此功能且距離上次檢查超過一天才連線
     fn auto_update_check(&mut self) {
@@ -1430,6 +1482,7 @@ impl App {
         let mut double: Option<usize> = None;
         let mut ctx_action: Option<Action> = None;
         let mut right_click: Option<usize> = None;
+        let mut drag_row: Option<usize> = None;
         let mut sort_click: Option<SortKey> = None;
         let modifiers = ui.input(|i| i.modifiers);
 
@@ -1444,7 +1497,7 @@ impl App {
             .id_salt(("files", in_archive))
             .striped(false)
             .resizable(true)
-            .sense(Sense::click())
+            .sense(Sense::click_and_drag())
             .auto_shrink(false)
             .cell_layout(Layout::left_to_right(Align::Center))
             .column(Column::remainder().at_least(240.0).clip(true))
@@ -1524,6 +1577,9 @@ impl App {
                     if resp.secondary_clicked() {
                         right_click = Some(i);
                     }
+                    if in_archive && resp.drag_started() {
+                        drag_row = Some(i);
+                    }
                     resp.context_menu(|ui| {
                         ui.set_min_width(170.0);
                         let is_archive_file = r.is_archive;
@@ -1568,6 +1624,14 @@ impl App {
         }
         if let Some((i, m)) = click {
             self.select_click(i, m);
+        }
+        // 從壓縮檔內拖曳出去：拖曳未選取的項目時只拖曳該項目，否則拖曳全部選取的項目
+        if let Some(i) = drag_row {
+            if !self.sel.contains(&i) {
+                self.sel = [i].into();
+                self.anchor = Some(i);
+            }
+            self.drag_out = Some(self.selected_rows().iter().map(|r| self.inner_name(r)).collect());
         }
         if let Some(i) = double {
             self.sel = [i].into();
@@ -1691,7 +1755,10 @@ impl App {
     }
 
     fn handle_drops(&mut self, ctx: &egui::Context) {
-        let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
+        // 從 Zipo 拖曳出去的暫存檔又被放回視窗時忽略，避免加入壓縮檔
+        let own = std::env::temp_dir().join("Zipo");
+        let dropped: Vec<PathBuf> =
+            ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.starts_with(&own)).collect());
         if dropped.is_empty() || self.busy() {
             return;
         }
@@ -2063,6 +2130,33 @@ fn is_executable(name: &str) -> bool {
     name.rsplit_once('.').is_some_and(|(_, e)| EXT.contains(&e.to_ascii_lowercase().as_str()))
 }
 
+/// 拖曳到程式外時先解壓縮的大小上限（解壓縮期間畫面會停住）
+const DRAG_OUT_MAX: u64 = 256 << 20;
+
+/// 交給系統的拖放；只複製，不移動
+#[cfg(windows)]
+fn drag_files(frame: &eframe::Frame, items: Vec<PathBuf>) {
+    let options = drag::Options { skip_animatation_on_cancel_or_failure: false, mode: drag::DragMode::Copy };
+    let image = drag::Image::Raw(drag_image());
+    let _ = drag::start_drag(frame, drag::DragItem::Files(items), image, |_, _| {}, options);
+}
+
+#[cfg(not(windows))]
+fn drag_files(_frame: &eframe::Frame, _items: Vec<PathBuf>) {}
+
+/// 拖曳時跟著游標的圖示（64 px 的程式圖示）
+#[cfg(windows)]
+fn drag_image() -> Vec<u8> {
+    static PNG: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    PNG.get_or_init(|| {
+        let Ok(img) = image::load_from_memory(include_bytes!("../assets/ziptool-256.png")) else { return Vec::new() };
+        let small = img.resize(64, 64, image::imageops::FilterType::Triangle);
+        let mut out = std::io::Cursor::new(Vec::new());
+        small.write_to(&mut out, image::ImageFormat::Png).map(|_| out.into_inner()).unwrap_or_default()
+    })
+    .clone()
+}
+
 fn unix_now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
@@ -2083,11 +2177,6 @@ fn cleanup_temp(only_mine: bool) {
     }
 }
 
-impl Drop for App {
-    fn drop(&mut self) {
-        cleanup_temp(true);
-    }
-}
 
 /// `prev` 是 `cur` 底下的直接子項目時，回傳其名稱。
 fn child_name(cur: &Location, prev: &Location) -> Option<String> {
@@ -2129,6 +2218,11 @@ fn strip_verbatim(p: PathBuf) -> PathBuf {
 impl eframe::App for App {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         self.save_settings(storage);
+    }
+
+    /// 程式結束時清除本程式建立的暫存資料夾（開啟壓縮檔內的檔案、拖曳到程式外）
+    fn on_exit(&mut self) {
+        cleanup_temp(true);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
@@ -2175,6 +2269,10 @@ impl eframe::App for App {
 
         self.progress_window(&ctx);
         self.dialogs(&ctx);
+
+        if let Some(entries) = self.drag_out.take() {
+            self.start_drag_out(entries, frame);
+        }
 
         #[cfg(debug_assertions)]
         self.devshot_tick(&ctx);
@@ -3077,5 +3175,121 @@ mod update_ui_tests {
         app.last_update_check = 0;
         app.auto_update_check();
         assert!(app.update_work.is_none(), "關閉自動檢查時不應連線");
+    }
+}
+
+#[cfg(test)]
+mod drag_out_tests {
+    use super::*;
+
+    fn load(app: &mut App, ctx: &egui::Context) {
+        for _ in 0..400 {
+            app.poll(ctx);
+            if app.loading.is_none() && app.job.is_none() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("讀取逾時");
+    }
+
+    /// 建立 docs/a.txt、docs/sub/b.txt、top.txt 的 zip，並進入 docs 資料夾
+    fn archive_in_docs(root: &Path, password: Option<&str>) -> (App, egui::Context) {
+        let src = root.join("src");
+        std::fs::create_dir_all(src.join("docs/sub")).unwrap();
+        std::fs::write(src.join("docs/a.txt"), "A").unwrap();
+        std::fs::write(src.join("docs/sub/b.txt"), "B").unwrap();
+        std::fs::write(src.join("top.txt"), "T").unwrap();
+        let ar = root.join("d.zip");
+        let opts = ziptool_core::CompressOptions { password: password.map(String::from), ..Default::default() };
+        ziptool_core::compress(&[src.join("docs"), src.join("top.txt")], &ar, Format::Zip, &opts, &ziptool_core::NoProgress).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = App::new(Some(ar.clone()));
+        load(&mut app, &ctx);
+        app.navigate(Location::Archive { path: ar, inner: "docs".into() });
+        (app, ctx)
+    }
+
+    #[test]
+    fn prepares_selected_items_for_dragging() {
+        let t = tempfile::tempdir().unwrap();
+        let (mut app, _ctx) = archive_in_docs(&real_path(t.path()), None);
+        let names: Vec<String> = app.rows.iter().map(|r| r.name.clone()).collect();
+        assert_eq!(names, ["sub", "a.txt"]);
+        app.sel = [0, 1].into();
+        let entries: Vec<String> = app.selected_rows().iter().map(|r| app.inner_name(r)).collect();
+        let mut items = app.prepare_drag_out(entries).unwrap();
+        items.sort();
+        // 最上層就是拖曳的兩個項目（去掉所在的 docs 資料夾），資料夾保留內容
+        let got: Vec<String> = items.iter().map(|p| file_name(p)).collect();
+        assert_eq!(got, ["a.txt", "sub"]);
+        assert_eq!(std::fs::read_to_string(&items[0]).unwrap(), "A");
+        assert_eq!(std::fs::read_to_string(items[1].join("b.txt")).unwrap(), "B");
+        assert!(items[0].starts_with(std::env::temp_dir().join("Zipo")));
+        assert!(app.dialog.is_none());
+    }
+
+    #[test]
+    fn encrypted_archive_asks_for_password_first() {
+        let t = tempfile::tempdir().unwrap();
+        let (mut app, _ctx) = archive_in_docs(&real_path(t.path()), Some("pw"));
+        assert!(app.prepare_drag_out(vec!["docs/a.txt".into()]).is_none());
+        assert!(matches!(app.dialog, Some(Dialog::Password(_))));
+    }
+
+    #[derive(Debug)]
+    struct TestFile(PathBuf);
+
+    impl egui::DroppedFile for TestFile {
+        fn path(&self) -> &Path {
+            &self.0
+        }
+        fn bytes(&self) -> Result<Vec<u8>, String> {
+            std::fs::read(&self.0).map_err(|e| e.to_string())
+        }
+    }
+
+    /// 從 Zipo 拖出去的暫存檔被放回視窗時忽略；一般檔案照常加入
+    #[test]
+    fn own_temp_files_dropped_back_are_ignored() {
+        let t = tempfile::tempdir().unwrap();
+        let (mut app, ctx) = archive_in_docs(&real_path(t.path()), None);
+        let drop = |app: &mut App, p: PathBuf| {
+            let file: egui::DroppedFileHandle = std::sync::Arc::new(TestFile(p));
+            let raw = egui::RawInput { dropped_files: vec![file], ..Default::default() };
+            let mut out = ctx.run_ui(raw, |ui| app.handle_drops(ui.ctx()));
+            out.textures_delta.clear();
+        };
+        drop(&mut app, std::env::temp_dir().join("Zipo").join("1-drag-2").join("a.txt"));
+        assert!(app.dialog.is_none(), "不應出現加入確認");
+        let other = t.path().join("other.txt");
+        std::fs::write(&other, "x").unwrap();
+        drop(&mut app, other);
+        assert!(matches!(app.dialog, Some(Dialog::ConfirmUpdate { .. })));
+    }
+
+    /// 在列上按住並拖動：拖曳該列（未選取時只拖曳該列）
+    #[test]
+    fn dragging_a_row_requests_drag_out() {
+        let t = tempfile::tempdir().unwrap();
+        let (mut app, ctx) = archive_in_docs(&real_path(t.path()), None);
+        let frame = |app: &mut App, events: Vec<egui::Event>| {
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(800.0, 600.0))),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(raw, |ui| app.file_table(ui));
+            out.textures_delta.clear();
+        };
+        frame(&mut app, vec![]);
+        // 第二列（a.txt）：表頭之下第二列的位置
+        let y = 32.0 + CONTROL_H * 1.5;
+        let at = egui::pos2(120.0, y);
+        let press = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        frame(&mut app, vec![egui::Event::PointerMoved(at), press(true)]);
+        frame(&mut app, vec![egui::Event::PointerMoved(at + vec2(30.0, 30.0))]);
+        frame(&mut app, vec![egui::Event::PointerMoved(at + vec2(60.0, 60.0))]);
+        assert_eq!(app.drag_out.as_deref(), Some(&["docs/a.txt".to_string()][..]), "選取：{:?}", app.sel);
     }
 }
