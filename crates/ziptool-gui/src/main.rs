@@ -200,6 +200,10 @@ fn format_duration(d: Duration) -> String {
 
 /// 用系統預設程式開啟檔案或資料夾。
 pub fn open_path(path: &Path) {
+    // 測試時不實際開啟檔案或資料夾
+    if cfg!(test) {
+        return;
+    }
     // 直接呼叫 ShellExecuteW，不經過 explorer.exe 的命令列：explorer 會把逗號當成參數分隔，
     // 例如「a,b.txt」會開成「文件」資料夾而不是這個檔案。在背景執行緒呼叫，避免部分程式卡住畫面。
     #[cfg(target_os = "windows")]
@@ -319,6 +323,18 @@ fn file_stamp(p: &Path) -> Option<(u64, Option<SystemTime>)> {
     std::fs::metadata(p).ok().map(|m| (m.len(), m.modified().ok()))
 }
 
+/// 從壓縮檔內開啟的檔案：在其他程式中修改並儲存後，詢問是否存回壓縮檔
+struct Watched {
+    archive: PathBuf,
+    /// 壓縮檔內的完整名稱
+    entry: String,
+    /// 解到暫存資料夾的檔案
+    file: PathBuf,
+    /// 上次確認時的大小與修改時間
+    stamp: Option<(u64, Option<SystemTime>)>,
+    password: Option<String>,
+}
+
 struct Loading {
     path: PathBuf,
     inner: String,
@@ -343,6 +359,8 @@ enum Dialog {
     About,
     /// 雜湊值結果；`expected` 為使用者貼上要比對的值
     Hashes { rows: Vec<(String, ziptool_core::Hashes)>, expected: String },
+    /// 從壓縮檔內開啟的檔案已修改，詢問是否存回（`watched` 的索引）
+    SaveBack(usize),
     /// 有新版本可以更新
     UpdateAvailable(update::Release),
     /// 正在下載並安裝更新
@@ -421,6 +439,9 @@ struct App {
     drag_out: Option<Vec<String>>,
     /// 上次在壓縮／解壓縮對話框勾選的「完成後開啟資料夾」
     open_after: bool,
+    /// 從壓縮檔內開啟、需要偵測修改的檔案
+    watched: Vec<Watched>,
+    last_watch_check: std::time::Instant,
     /// 效能診斷（設定 ZIPTOOL_PERF 時啟用）
     #[cfg(debug_assertions)]
     perf: Option<perf::Perf>,
@@ -469,6 +490,8 @@ impl App {
             pending_release: None,
             drag_out: None,
             open_after: false,
+            watched: Vec::new(),
+            last_watch_check: std::time::Instant::now(),
             #[cfg(debug_assertions)]
             perf: perf::Perf::from_env(),
             #[cfg(debug_assertions)]
@@ -1052,6 +1075,48 @@ impl App {
         }
     }
 
+    /// 開始偵測從壓縮檔內開啟的檔案。解出的檔名與項目名稱不同時（名稱被清理過）不偵測，避免存回成另一個項目
+    fn watch(&mut self, archive: PathBuf, entry: String, file: PathBuf, password: Option<String>) {
+        let base = entry.rsplit('/').next().unwrap_or(&entry);
+        if file_name(&file) != base {
+            return;
+        }
+        self.watched.retain(|w| w.file != file);
+        self.watched.push(Watched { archive, entry, stamp: file_stamp(&file), file, password });
+    }
+
+    /// 每秒檢查一次開啟的檔案是否被修改；有修改時詢問是否存回（沒有其他對話框或工作時）
+    fn check_watched(&mut self, ctx: &egui::Context) {
+        if self.watched.is_empty() {
+            return;
+        }
+        ctx.request_repaint_after(Duration::from_secs(1));
+        if self.last_watch_check.elapsed() < Duration::from_secs(1) || self.dialog.is_some() || self.busy() {
+            return;
+        }
+        self.last_watch_check = std::time::Instant::now();
+        self.find_modified();
+    }
+
+    fn find_modified(&mut self) {
+        // 暫存檔已被刪除（例如程式結束清除）時不再偵測
+        self.watched.retain(|w| w.file.exists());
+        if let Some(i) = self.watched.iter().position(|w| file_stamp(&w.file) != w.stamp) {
+            self.dialog = Some(Dialog::SaveBack(i));
+        }
+    }
+
+    /// 回答存回詢問：記下目前的狀態（下次修改時再問），`save` 為真時更新壓縮檔
+    fn answer_save_back(&mut self, i: usize, save: bool) {
+        let Some(w) = self.watched.get_mut(i) else { return };
+        w.stamp = file_stamp(&w.file);
+        if save {
+            let into = w.entry.rsplit_once('/').map(|(dir, _)| dir.to_string()).unwrap_or_default();
+            let task = Task::Update { archive: w.archive.clone(), add: vec![w.file.clone()], into, remove: Vec::new(), password: w.password.clone() };
+            self.spawn(task);
+        }
+    }
+
     /// 對話框預設勾選上次的「完成後開啟資料夾」
     fn with_open_after_add(&self, mut d: AddDialog) -> AddDialog {
         d.open_folder = self.open_after;
@@ -1118,6 +1183,11 @@ impl App {
 
         if self.job.as_ref().is_some_and(|j| j.is_finished()) {
             let (task, res) = self.job.take().unwrap().join();
+            if let (Task::OpenInside { archive, entry, password, .. }, Ok(out)) = (&task, &res)
+                && let Some(file) = &out.opened
+            {
+                self.watch(archive.clone(), entry.clone(), file.clone(), password.clone());
+            }
             if ctx.input(|i| i.viewport().focused) == Some(false) {
                 ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
             }
@@ -2075,6 +2145,31 @@ impl App {
                 let (ok, cancel) = dialog_buttons_single(ui);
                 keep = !(ok || cancel);
             }
+            Dialog::SaveBack(i) => {
+                let i = *i;
+                let p = pal(ui);
+                ui.set_width(440.0);
+                let (name, archive) = self.watched.get(i).map(|w| (file_name(&w.file), file_name(&w.archive))).unwrap_or_default();
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(icon::FLOPPY_DISK).size(22.0).color(p.accent));
+                    ui.label(RichText::new("要把修改存回壓縮檔嗎？").size(16.0).strong().color(p.text));
+                });
+                ui.add_space(8.0);
+                ui.add(egui::Label::new(RichText::new(format!("「{name}」已在其他程式中修改並儲存。\n要把新版本更新到「{archive}」嗎？")).color(p.text)).wrap());
+                ui.add_space(6.0);
+                let (mut save, mut skip) = (false, false);
+                ui.allocate_ui_with_layout(vec2(ui.available_width(), 32.0), Layout::right_to_left(Align::Center), |ui| {
+                    skip = ui.add(secondary_button(ui, "不要")).clicked();
+                    save = ui.add(primary_button(ui, "存回壓縮檔")).clicked();
+                });
+                skip |= ui.input(|i| i.key_pressed(Key::Escape));
+                if save || skip {
+                    keep = false;
+                    // 先關閉這個對話框，再開始更新（更新完成會顯示結果）
+                    self.dialog = None;
+                    self.answer_save_back(i, save);
+                }
+            }
             Dialog::Updating => {
                 let p = pal(ui);
                 ui.set_width(400.0);
@@ -2329,6 +2424,7 @@ impl eframe::App for App {
         }
         self.poll(&ctx);
         self.poll_update(&ctx);
+        self.check_watched(&ctx);
         self.handle_drops(&ctx);
         self.keyboard(&ctx);
         #[cfg(not(debug_assertions))]
@@ -2408,6 +2504,11 @@ impl App {
                         self.dialog = Some(Dialog::UpdateAvailable(update::Release { version: "0.3.0".into(), page, asset: Some(asset) }));
                     }
                     "updating" => self.dialog = Some(Dialog::Updating),
+                    "saveback" => {
+                        let file = std::env::temp_dir().join("報告.docx");
+                        self.watched.push(Watched { archive: "專案資料.zip".into(), entry: "報告.docx".into(), file, stamp: None, password: None });
+                        self.dialog = Some(Dialog::SaveBack(0));
+                    }
                     "hash" => {
                         let h = ziptool_core::hash_reader(&mut &b"abc"[..], &ziptool_core::NoProgress).unwrap();
                         let rows = vec![("zipo-0.3.1-windows-x64.zip".into(), h.clone()), ("說明文件.pdf".into(), h)];
@@ -3491,5 +3592,83 @@ mod hash_tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(!leftover(), "不應留下暫存資料夾");
+    }
+}
+
+#[cfg(test)]
+mod save_back_tests {
+    use super::*;
+
+    fn wait(app: &mut App, ctx: &egui::Context) {
+        for _ in 0..800 {
+            app.poll(ctx);
+            if app.loading.is_none() && app.job.is_none() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("逾時");
+    }
+
+    fn content(ar: &Path, entry: &str) -> (String, usize) {
+        let entries = ziptool_core::list(ar, None).unwrap();
+        let count = entries.iter().filter(|e| e.name == entry).count();
+        let out = tempfile::tempdir().unwrap();
+        let opts = ziptool_core::ExtractOptions { selection: Some(vec![entry.into()]), ..Default::default() };
+        ziptool_core::extract(ar, out.path(), &opts, &ziptool_core::NoProgress).unwrap();
+        (std::fs::read_to_string(out.path().join(entry)).unwrap(), count)
+    }
+
+    /// 修改檔案：內容不同且修改時間往後，確保偵測得到
+    fn edit(file: &Path, text: &str, secs: u64) {
+        std::fs::write(file, text).unwrap();
+        let f = std::fs::File::options().write(true).open(file).unwrap();
+        f.set_modified(SystemTime::now() + Duration::from_secs(secs)).unwrap();
+    }
+
+    #[test]
+    fn edited_file_is_saved_back_into_archive() {
+        let t = tempfile::tempdir().unwrap();
+        let root = real_path(t.path());
+        std::fs::create_dir_all(root.join("src/docs")).unwrap();
+        std::fs::write(root.join("src/docs/report.txt"), "v1").unwrap();
+        let ar = root.join("e.zip");
+        ziptool_core::compress(&[root.join("src/docs")], &ar, Format::Zip, &Default::default(), &ziptool_core::NoProgress).unwrap();
+
+        let ctx = egui::Context::default();
+        let mut app = App::new(Some(ar.clone()));
+        wait(&mut app, &ctx);
+        app.navigate(Location::Archive { path: ar.clone(), inner: "docs".into() });
+        app.open_row(0);
+        wait(&mut app, &ctx);
+        assert_eq!(app.watched.len(), 1);
+        let file = app.watched[0].file.clone();
+
+        // 沒有修改：不詢問
+        app.find_modified();
+        assert!(app.dialog.is_none());
+
+        // 修改後詢問，存回：壓縮檔內容更新且不會重複
+        edit(&file, "v2", 10);
+        app.find_modified();
+        assert!(matches!(app.dialog, Some(Dialog::SaveBack(0))));
+        app.dialog = None;
+        app.answer_save_back(0, true);
+        wait(&mut app, &ctx);
+        assert_eq!(content(&ar, "docs/report.txt"), ("v2".to_string(), 1));
+        app.dialog = None;
+        app.find_modified();
+        assert!(app.dialog.is_none(), "存回後不應再詢問");
+
+        // 再次修改、選「不要」：壓縮檔不變，也不會一直詢問
+        edit(&file, "v3", 20);
+        app.find_modified();
+        assert!(matches!(app.dialog, Some(Dialog::SaveBack(0))));
+        app.dialog = None;
+        app.answer_save_back(0, false);
+        assert!(app.job.is_none());
+        app.find_modified();
+        assert!(app.dialog.is_none());
+        assert_eq!(content(&ar, "docs/report.txt"), ("v2".to_string(), 1));
     }
 }

@@ -80,6 +80,8 @@ pub struct Outcome {
     pub hashes: Vec<(String, ziptool_core::Hashes)>,
     /// 完成後自動開啟 `open_dir`
     pub auto_open: bool,
+    /// 開啟壓縮檔內的檔案時，實際解出並開啟的檔案（用來偵測修改後存回）
+    pub opened: Option<PathBuf>,
 }
 
 /// 取得鎖；即使另一個執行緒在持有鎖時 panic，也繼續使用資料而不連鎖 panic。
@@ -398,7 +400,7 @@ fn run(task: Task, s: &Shared) -> Result<Outcome, Error> {
             }
             let file = extracted_file(&dir).ok_or_else(|| Error::Unsupported(format!("無法開啟 {entry}")))?;
             crate::open_path(&file);
-            Ok(Outcome::default())
+            Ok(Outcome { opened: Some(file), ..Default::default() })
         }
     }
 }
