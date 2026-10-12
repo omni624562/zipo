@@ -2703,6 +2703,10 @@ fn real_path(p: &Path) -> PathBuf {
     strip_verbatim(std::fs::canonicalize(p).unwrap())
 }
 
+/// 測試用：會在壓縮檔內計算雜湊值的測試依序執行，檢查暫存資料夾時才不會看到其他測試正在使用的
+#[cfg(test)]
+static HASH_INSIDE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Windows 的 canonicalize 會加上 `\\?\` 前綴，顯示時去掉。
 fn strip_verbatim(p: PathBuf) -> PathBuf {
     let s = p.to_string_lossy();
@@ -3884,6 +3888,7 @@ mod hash_tests {
     /// 壓縮檔內的搜尋找遍所有層；結果可以直接操作（計算雜湊值、開啟資料夾）
     #[test]
     fn search_inside_archive_reaches_all_levels() {
+        let _lock = crate::HASH_INSIDE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let t = tempfile::tempdir().unwrap();
         let root = real_path(t.path());
         std::fs::create_dir_all(root.join("src/docs/deep")).unwrap();
@@ -3930,6 +3935,7 @@ mod hash_tests {
 
     #[test]
     fn hashes_entries_inside_archive() {
+        let _lock = crate::HASH_INSIDE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let t = tempfile::tempdir().unwrap();
         let root = real_path(t.path());
         std::fs::create_dir_all(root.join("src/docs")).unwrap();
@@ -3944,17 +3950,11 @@ mod hash_tests {
         app.cmd_hash();
         wait(&mut app, &ctx);
         assert_eq!(hashes_dialog(&app), [("abc.txt".to_string(), ABC.to_string())]);
-        // 暫存資料夾已刪除（其他平行執行的測試也可能正在計算，等它們結束）
-        let leftover = || {
-            std::fs::read_dir(std::env::temp_dir().join("Zipo"))
-                .map(|d| d.flatten().any(|e| e.file_name().to_string_lossy().starts_with(&format!("{}-hash-", std::process::id()))))
-                .unwrap_or(false)
-        };
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while leftover() && std::time::Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        assert!(!leftover(), "不應留下暫存資料夾");
+        // 暫存資料夾已刪除
+        let leftover: Vec<String> = std::fs::read_dir(std::env::temp_dir().join("Zipo"))
+            .map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with(&format!("{}-hash-", std::process::id()))).collect())
+            .unwrap_or_default();
+        assert!(leftover.is_empty(), "不應留下暫存資料夾：{leftover:?}");
     }
 }
 
@@ -4130,6 +4130,7 @@ mod nested_tests {
 
     #[test]
     fn browse_archive_inside_archive() {
+        let _lock = crate::HASH_INSIDE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let t = tempfile::tempdir().unwrap();
         let root = real_path(t.path());
         // inner.zip：x/y.txt
