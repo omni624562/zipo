@@ -2,6 +2,7 @@
 //! CLI 與 GUI 共用此 crate。
 
 mod format;
+mod hash;
 mod progress;
 mod sevenz;
 mod single;
@@ -13,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 pub use format::Format;
+pub use hash::{Hashes, hash_files, hash_reader};
 pub use progress::{NoProgress, OverwriteAnswer, Progress};
 pub use util::{describe, format_size, local_time, set_zip_codepage, zip_codepage};
 

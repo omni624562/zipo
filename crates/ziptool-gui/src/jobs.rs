@@ -21,6 +21,10 @@ pub enum Task {
     Update { archive: PathBuf, add: Vec<PathBuf>, into: String, remove: Vec<String>, password: Option<String> },
     /// 把壓縮檔內的單一檔案解到暫存資料夾後，用系統預設程式開啟。
     OpenInside { archive: PathBuf, entry: String, strip: String, password: Option<String> },
+    /// 計算檔案（資料夾則為其中每個檔案）的雜湊值
+    Hash { inputs: Vec<PathBuf> },
+    /// 計算壓縮檔內項目的雜湊值：先解到暫存資料夾
+    HashInside { archive: PathBuf, entries: Vec<String>, strip: String, password: Option<String> },
 }
 
 impl Task {
@@ -31,14 +35,18 @@ impl Task {
             Task::Test { .. } => "正在測試",
             Task::OpenInside { .. } => "正在開啟",
             Task::Update { .. } => "正在更新壓縮檔",
+            Task::Hash { .. } | Task::HashInside { .. } => "正在計算雜湊值",
         }
     }
 
     pub fn set_password(&mut self, pw: String) {
         match self {
             Task::Extract { opts, .. } => opts.password = Some(pw),
-            Task::Test { password, .. } | Task::OpenInside { password, .. } | Task::Update { password, .. } => *password = Some(pw),
-            Task::Compress { .. } => {}
+            Task::Test { password, .. }
+            | Task::OpenInside { password, .. }
+            | Task::Update { password, .. }
+            | Task::HashInside { password, .. } => *password = Some(pw),
+            Task::Compress { .. } | Task::Hash { .. } => {}
         }
     }
 
@@ -50,6 +58,7 @@ impl Task {
     }
 }
 
+#[derive(Default)]
 pub struct Outcome {
     pub title: String,
     pub message: String,
@@ -58,6 +67,8 @@ pub struct Outcome {
     pub refresh: bool,
     /// 被略過的項目（有的話以警告樣式顯示）
     pub issues: Vec<Issue>,
+    /// 雜湊值計算的結果（有的話顯示雜湊值對話框）
+    pub hashes: Vec<(String, ziptool_core::Hashes)>,
 }
 
 /// 取得鎖；即使另一個執行緒在持有鎖時 panic，也繼續使用資料而不連鎖 panic。
@@ -252,6 +263,7 @@ fn run(task: Task, s: &Shared) -> Result<Outcome, Error> {
                 open_dir: output.parent().map(Path::to_path_buf),
                 refresh: true,
                 issues: Vec::new(),
+                ..Default::default()
             })
         }
         Task::Extract { archives, dest, opts, smart } => {
@@ -284,6 +296,7 @@ fn run(task: Task, s: &Shared) -> Result<Outcome, Error> {
                 open_dir: Some(shown),
                 refresh: true,
                 issues,
+                ..Default::default()
             })
         }
         Task::Test { archives, password } => {
@@ -301,6 +314,7 @@ fn run(task: Task, s: &Shared) -> Result<Outcome, Error> {
                 open_dir: None,
                 refresh: false,
                 issues: Vec::new(),
+                ..Default::default()
             })
         }
         Task::Update { archive, add, into, remove, password } => {
@@ -318,7 +332,25 @@ fn run(task: Task, s: &Shared) -> Result<Outcome, Error> {
                 open_dir: None,
                 refresh: true,
                 issues: Vec::new(),
+                ..Default::default()
             })
+        }
+        Task::Hash { inputs } => Ok(Outcome { hashes: ziptool_core::hash_files(&inputs, s)?, ..Default::default() }),
+        Task::HashInside { archive, entries, strip, password } => {
+            let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+            let dir = std::env::temp_dir().join("Zipo").join(format!("{}-hash-{stamp}", std::process::id()));
+            let r = (|| {
+                let opts = ExtractOptions { password, selection: Some(entries), strip_prefix: strip, ..Default::default() };
+                let r = ziptool_core::extract(&archive, &dir, &opts, s)?;
+                if let Some(i) = r.issues.first() {
+                    return Err(Error::Unsupported(format!("無法讀取 {}：{}", i.name, i.reason)));
+                }
+                let mut top: Vec<PathBuf> = std::fs::read_dir(&dir).map(|d| d.flatten().map(|e| e.path()).collect()).unwrap_or_default();
+                top.sort();
+                ziptool_core::hash_files(&top, s)
+            })();
+            let _ = std::fs::remove_dir_all(&dir);
+            Ok(Outcome { hashes: r?, ..Default::default() })
         }
         Task::OpenInside { archive, entry, strip, password } => {
             let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
@@ -330,7 +362,7 @@ fn run(task: Task, s: &Shared) -> Result<Outcome, Error> {
             }
             let file = extracted_file(&dir).ok_or_else(|| Error::Unsupported(format!("無法開啟 {entry}")))?;
             crate::open_path(&file);
-            Ok(Outcome { title: String::new(), message: String::new(), open_dir: None, refresh: false, issues: Vec::new() })
+            Ok(Outcome::default())
         }
     }
 }

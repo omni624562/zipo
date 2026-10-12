@@ -341,6 +341,8 @@ enum Dialog {
     /// 更新壓縮檔（加入或刪除項目）前確認
     ConfirmUpdate { task: Task, title: String, message: String, danger: bool },
     About,
+    /// 雜湊值結果；`expected` 為使用者貼上要比對的值
+    Hashes { rows: Vec<(String, ziptool_core::Hashes)>, expected: String },
     /// 有新版本可以更新
     UpdateAvailable(update::Release),
     /// 正在下載並安裝更新
@@ -372,6 +374,7 @@ enum Action {
     Test,
     Info,
     Delete,
+    Hash,
 }
 
 struct App {
@@ -1036,7 +1039,27 @@ impl App {
             Action::Test => self.cmd_test(),
             Action::Info => self.cmd_info(),
             Action::Delete => self.cmd_delete(),
+            Action::Hash => self.cmd_hash(),
         }
+    }
+
+    /// 計算選取項目的雜湊值；壓縮檔內的項目先解到暫存資料夾
+    fn cmd_hash(&mut self) {
+        let rows: Vec<Row> = self.selected_rows().into_iter().filter(|r| !r.is_drive).cloned().collect();
+        if rows.is_empty() {
+            return self.notice("計算雜湊值", "請先選取檔案或資料夾。");
+        }
+        let task = match &self.loc {
+            Location::Archive { path, inner } => Task::HashInside {
+                archive: path.clone(),
+                entries: rows.iter().map(|r| self.inner_name(r)).collect(),
+                strip: inner.clone(),
+                password: self.cache.as_ref().and_then(|c| c.password.clone()),
+            },
+            Location::Dir(d) => Task::Hash { inputs: rows.iter().map(|r| d.join(&r.name)).collect() },
+            Location::Computer => return,
+        };
+        self.spawn(task);
     }
 
     fn spawn(&mut self, task: Task) {
@@ -1087,7 +1110,9 @@ impl App {
                     if out.refresh {
                         self.refresh();
                     }
-                    if !out.title.is_empty() {
+                    if !out.hashes.is_empty() {
+                        self.dialog = Some(Dialog::Hashes { rows: out.hashes, expected: String::new() });
+                    } else if !out.title.is_empty() {
                         self.dialog = Some(Dialog::Notice {
                             title: out.title,
                             message: out.message,
@@ -1102,7 +1127,8 @@ impl App {
                         Task::Extract { archives, .. } | Task::Test { archives, .. } => file_name(&archives[0]),
                         Task::OpenInside { archive, .. } => file_name(archive),
                         Task::Compress { output, .. } => file_name(output),
-                        Task::Update { archive, .. } => file_name(archive),
+                        Task::Update { archive, .. } | Task::HashInside { archive, .. } => file_name(archive),
+                        Task::Hash { inputs } => inputs.first().map(|p| file_name(p)).unwrap_or_default(),
                     };
                     self.dialog = Some(Dialog::Password(PasswordDialog::new(
                         PasswordPurpose::Retry(task),
@@ -1599,6 +1625,9 @@ impl App {
                         if in_archive && ui.button(format!("{}  從壓縮檔刪除", icon::TRASH)).clicked() {
                             ctx_action = Some(Action::Delete);
                         }
+                        if !r.is_drive && ui.button(format!("{}  計算雜湊值", icon::FINGERPRINT)).clicked() {
+                            ctx_action = Some(Action::Hash);
+                        }
                         ui.separator();
                         if ui.button(format!("{}  內容", icon::INFO)).clicked() {
                             ctx_action = Some(Action::Info);
@@ -1983,6 +2012,42 @@ impl App {
                 }
                 keep = !(go || later);
             }
+            Dialog::Hashes { rows, expected } => {
+                let p = pal(ui);
+                ui.set_width(640.0);
+                dialog_title(ui, icon::FINGERPRINT, "雜湊值");
+                egui::ScrollArea::vertical().max_height(360.0).auto_shrink([false, true]).show(ui, |ui| {
+                    for (name, h) in rows.iter() {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(name.as_str()).strong().color(p.text));
+                            ui.label(RichText::new(human(h.size)).color(p.text2));
+                        });
+                        egui::Grid::new(("hash", name.as_str())).num_columns(3).spacing([12.0, 4.0]).show(ui, |ui| {
+                            for (algo, value) in h.all() {
+                                ui.label(RichText::new(algo).color(p.text2));
+                                ui.add(egui::Label::new(RichText::new(value).monospace().color(p.text)).selectable(true));
+                                if ui.small_button(icon::COPY).on_hover_text("複製").clicked() {
+                                    ui.ctx().copy_text(value.to_string());
+                                }
+                                ui.end_row();
+                            }
+                        });
+                        ui.add_space(10.0);
+                    }
+                });
+                ui.add_space(4.0);
+                ui.label(RichText::new("比對：貼上網站提供的雜湊值").color(p.text2));
+                ui.add(egui::TextEdit::singleline(expected).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace));
+                if !expected.trim().is_empty() {
+                    let hit = rows.iter().find_map(|(name, h)| h.matches(expected).map(|algo| (name, algo)));
+                    match hit {
+                        Some((name, algo)) => ui.label(RichText::new(format!("{}  符合「{name}」的 {algo}", icon::CHECK_CIRCLE)).color(p.success)),
+                        None => ui.label(RichText::new(format!("{}  不符合任何一個檔案的雜湊值", icon::X_CIRCLE)).color(p.danger)),
+                    };
+                }
+                let (ok, cancel) = dialog_buttons_single(ui);
+                keep = !(ok || cancel);
+            }
             Dialog::Updating => {
                 let p = pal(ui);
                 ui.set_width(400.0);
@@ -2315,6 +2380,11 @@ impl App {
                         self.dialog = Some(Dialog::UpdateAvailable(update::Release { version: "0.3.0".into(), page, asset: Some(asset) }));
                     }
                     "updating" => self.dialog = Some(Dialog::Updating),
+                    "hash" => {
+                        let h = ziptool_core::hash_reader(&mut &b"abc"[..], &ziptool_core::NoProgress).unwrap();
+                        let rows = vec![("zipo-0.3.1-windows-x64.zip".into(), h.clone()), ("說明文件.pdf".into(), h)];
+                        self.dialog = Some(Dialog::Hashes { rows, expected: "BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD".into() });
+                    }
                     "test" => self.cmd_test(),
                     "compress-run" => self.spawn(compress(5)),
                     "progress-compress" => self.spawn(compress(9)),
@@ -3291,5 +3361,66 @@ mod drag_out_tests {
         frame(&mut app, vec![egui::Event::PointerMoved(at + vec2(30.0, 30.0))]);
         frame(&mut app, vec![egui::Event::PointerMoved(at + vec2(60.0, 60.0))]);
         assert_eq!(app.drag_out.as_deref(), Some(&["docs/a.txt".to_string()][..]), "選取：{:?}", app.sel);
+    }
+}
+
+#[cfg(test)]
+mod hash_tests {
+    use super::*;
+
+    fn wait(app: &mut App, ctx: &egui::Context) {
+        for _ in 0..800 {
+            app.poll(ctx);
+            if app.loading.is_none() && app.job.is_none() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("逾時");
+    }
+
+    fn hashes_dialog(app: &App) -> Vec<(String, String)> {
+        match &app.dialog {
+            Some(Dialog::Hashes { rows, .. }) => rows.iter().map(|(n, h)| (n.clone(), h.sha256.clone())).collect(),
+            _ => panic!("應出現雜湊值對話框"),
+        }
+    }
+
+    const ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+    #[test]
+    fn hashes_files_on_disk() {
+        let t = tempfile::tempdir().unwrap();
+        let root = real_path(t.path());
+        std::fs::write(root.join("abc.txt"), "abc").unwrap();
+        let ctx = egui::Context::default();
+        let mut app = App::new(Some(root.clone()));
+        app.sel = [app.rows.iter().position(|r| r.name == "abc.txt").unwrap()].into();
+        app.cmd_hash();
+        wait(&mut app, &ctx);
+        assert_eq!(hashes_dialog(&app), [("abc.txt".to_string(), ABC.to_string())]);
+    }
+
+    #[test]
+    fn hashes_entries_inside_archive() {
+        let t = tempfile::tempdir().unwrap();
+        let root = real_path(t.path());
+        std::fs::create_dir_all(root.join("src/docs")).unwrap();
+        std::fs::write(root.join("src/docs/abc.txt"), "abc").unwrap();
+        let ar = root.join("h.zip");
+        ziptool_core::compress(&[root.join("src/docs")], &ar, Format::Zip, &Default::default(), &ziptool_core::NoProgress).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = App::new(Some(ar.clone()));
+        wait(&mut app, &ctx);
+        app.navigate(Location::Archive { path: ar, inner: "docs".into() });
+        app.sel = [0].into();
+        app.cmd_hash();
+        wait(&mut app, &ctx);
+        assert_eq!(hashes_dialog(&app), [("abc.txt".to_string(), ABC.to_string())]);
+        // 暫存資料夾已刪除
+        let leftover = std::fs::read_dir(std::env::temp_dir().join("Zipo"))
+            .map(|d| d.flatten().any(|e| e.file_name().to_string_lossy().starts_with(&format!("{}-hash-", std::process::id()))))
+            .unwrap_or(false);
+        assert!(!leftover, "不應留下暫存資料夾");
     }
 }

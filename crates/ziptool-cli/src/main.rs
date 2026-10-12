@@ -17,6 +17,7 @@ const HELP: &str = "\
   a : 加入到壓縮檔（壓縮檔已存在時加入或取代同名項目）
   d : 從壓縮檔刪除項目
   e : 解壓縮，不含資料夾結構
+  h : 計算檔案的雜湊值（CRC32、MD5、SHA-1、SHA-256），資料夾則計算其中每個檔案
   l : 列出內容
   t : 測試完整性
   u : 更新壓縮檔（同 a）
@@ -65,6 +66,7 @@ enum Cmd {
     List,
     Test,
     Info,
+    Hash,
 }
 
 #[derive(Debug, Default)]
@@ -108,6 +110,7 @@ fn parse(argv: Vec<String>) -> Result<Args, String> {
         "l" => Cmd::List,
         "t" => Cmd::Test,
         "i" => Cmd::Info,
+        "h" => Cmd::Hash,
         other => return Err(format!("不支援的指令：{other}")),
     });
     let mut only_files = false;
@@ -429,6 +432,26 @@ fn cmd_test(a: &Args) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 與 7z 的 h 指令相同：所有引數都是要計算的檔案或資料夾
+fn cmd_hash(a: &Args) -> anyhow::Result<()> {
+    let inputs: Vec<PathBuf> = a.archive.iter().cloned().chain(a.files.iter().map(PathBuf::from)).collect();
+    if inputs.is_empty() {
+        anyhow::bail!("缺少檔案名稱");
+    }
+    let bar = Bar::new(a.no_progress);
+    let results = ziptool_core::hash_files(&inputs, &bar)?;
+    bar.0.finish_and_clear();
+    for (name, h) in &results {
+        println!("{}（{}）", clean(name), format_size(h.size));
+        for (algo, value) in h.all() {
+            println!("  {algo:<8}{value}");
+        }
+        println!();
+    }
+    println!("{} 個檔案", results.len());
+    Ok(())
+}
+
 fn cmd_list(a: &Args) -> anyhow::Result<()> {
     let archive = archive_path(a)?;
     let entries = with_password(a, |pw| ziptool_core::list(archive, pw))?;
@@ -488,7 +511,8 @@ fn cmd_info() {
 fn main() -> ExitCode {
     println!("Zipo {} ：以 7-Zip 為藍本的壓縮工具\n", env!("CARGO_PKG_VERSION"));
     let argv: Vec<String> = std::env::args().skip(1).collect();
-    if argv.is_empty() || matches!(argv[0].as_str(), "-h" | "--help" | "h" | "/?") {
+    // 只寫 h 時顯示說明；h 後面接檔案時是計算雜湊值（與 7z 相同）
+    if argv.is_empty() || matches!(argv[0].as_str(), "-h" | "--help" | "/?") || argv == ["h"] {
         print!("{HELP}");
         return ExitCode::from(exit::OK);
     }
@@ -507,6 +531,7 @@ fn main() -> ExitCode {
         Some(Cmd::ExtractFlat) => cmd_extract(&args, true),
         Some(Cmd::List) => cmd_list(&args),
         Some(Cmd::Test) => cmd_test(&args),
+        Some(Cmd::Hash) => cmd_hash(&args),
         Some(Cmd::Info) | None => {
             cmd_info();
             Ok(())

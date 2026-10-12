@@ -190,3 +190,17 @@ fn control_characters_in_names_are_escaped() {
     let x = run(tmp.path(), &["x", "-y", "-oout", "evil.zip"], "");
     assert!(!bad(&text(&x)), "{:?}", text(&x));
 }
+
+/// h 指令：計算雜湊值（以 "abc" 的標準測試向量驗證）
+#[test]
+fn hash_command() {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::write(tmp.path().join("abc.txt"), "abc").unwrap();
+    let o = run(tmp.path(), &["h", "-bd", "abc.txt"], "");
+    assert!(o.status.success(), "{}", text(&o));
+    let t = text(&o);
+    assert!(t.contains("SHA-256 ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"), "{t}");
+    assert!(t.contains("MD5     900150983cd24fb0d6963f7d28e17f72"), "{t}");
+    assert!(t.contains("CRC32   352441c2"), "{t}");
+    assert_eq!(run(tmp.path(), &["h", "不存在.txt"], "").status.code(), Some(2));
+}
