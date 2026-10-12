@@ -9,6 +9,8 @@ mod devshot;
 mod dialogs;
 mod jobs;
 mod localize;
+// 效能診斷只在開發版提供：正式版不應依環境變數寫檔、自動捲動或自行關閉
+#[cfg(debug_assertions)]
 mod perf;
 mod shell;
 mod theme;
@@ -391,6 +393,7 @@ struct App {
     /// 顯示「隱藏＋系統」屬性的項目（預設與檔案總管相同，不顯示）
     show_system: bool,
     /// 效能診斷（設定 ZIPTOOL_PERF 時啟用）
+    #[cfg(debug_assertions)]
     perf: Option<perf::Perf>,
 
     #[cfg(debug_assertions)]
@@ -431,6 +434,7 @@ impl App {
             add_format: Format::SevenZ,
             add_level: 3,
             show_system: false,
+            #[cfg(debug_assertions)]
             perf: perf::Perf::from_env(),
             #[cfg(debug_assertions)]
             devshot: None,
@@ -1986,6 +1990,9 @@ impl eframe::App for App {
         self.poll(&ctx);
         self.handle_drops(&ctx);
         self.keyboard(&ctx);
+        #[cfg(not(debug_assertions))]
+        let _ = frame; // 只有效能診斷用到
+        #[cfg(debug_assertions)]
         if let Some(p) = &mut self.perf
             && let Some(row) = p.tick(&ctx, frame, self.rows.len())
         {
