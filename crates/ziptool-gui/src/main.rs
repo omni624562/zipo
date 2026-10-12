@@ -3480,10 +3480,16 @@ mod hash_tests {
         app.cmd_hash();
         wait(&mut app, &ctx);
         assert_eq!(hashes_dialog(&app), [("abc.txt".to_string(), ABC.to_string())]);
-        // 暫存資料夾已刪除
-        let leftover = std::fs::read_dir(std::env::temp_dir().join("Zipo"))
-            .map(|d| d.flatten().any(|e| e.file_name().to_string_lossy().starts_with(&format!("{}-hash-", std::process::id()))))
-            .unwrap_or(false);
-        assert!(!leftover, "不應留下暫存資料夾");
+        // 暫存資料夾已刪除（其他平行執行的測試也可能正在計算，等它們結束）
+        let leftover = || {
+            std::fs::read_dir(std::env::temp_dir().join("Zipo"))
+                .map(|d| d.flatten().any(|e| e.file_name().to_string_lossy().starts_with(&format!("{}-hash-", std::process::id()))))
+                .unwrap_or(false)
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while leftover() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!leftover(), "不應留下暫存資料夾");
     }
 }
