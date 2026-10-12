@@ -12,6 +12,7 @@ mod localize;
 // 效能診斷只在開發版提供：正式版不應依環境變數寫檔、自動捲動或自行關閉
 #[cfg(debug_assertions)]
 mod perf;
+mod preview;
 mod shell;
 mod theme;
 mod update;
@@ -323,6 +324,22 @@ fn file_stamp(p: &Path) -> Option<(u64, Option<SystemTime>)> {
     std::fs::metadata(p).ok().map(|m| (m.len(), m.modified().ok()))
 }
 
+/// 預覽窗格目前顯示的項目
+struct Preview {
+    /// 位置與名稱；選取改變時重新讀取
+    key: String,
+    name: String,
+    size: Option<u64>,
+    modified: Option<SystemTime>,
+    state: PreviewState,
+    texture: Option<egui::TextureHandle>,
+}
+
+enum PreviewState {
+    Loading(JoinHandle<preview::Content>),
+    Ready(preview::Content),
+}
+
 /// 從壓縮檔內開啟的檔案：在其他程式中修改並儲存後，詢問是否存回壓縮檔
 struct Watched {
     archive: PathBuf,
@@ -441,6 +458,9 @@ struct App {
     open_after: bool,
     /// 從壓縮檔內開啟、需要偵測修改的檔案
     watched: Vec<Watched>,
+    /// 顯示預覽窗格（檢視 › 預覽窗格，Alt+P）
+    preview_open: bool,
+    preview: Option<Preview>,
     last_watch_check: std::time::Instant,
     /// 效能診斷（設定 ZIPTOOL_PERF 時啟用）
     #[cfg(debug_assertions)]
@@ -491,6 +511,8 @@ impl App {
             drag_out: None,
             open_after: false,
             watched: Vec::new(),
+            preview_open: false,
+            preview: None,
             last_watch_check: std::time::Instant::now(),
             #[cfg(debug_assertions)]
             perf: perf::Perf::from_env(),
@@ -500,6 +522,7 @@ impl App {
         let get = |k: &str| storage.and_then(|s| s.get_string(k));
         app.auto_update = get("auto_update").as_deref() != Some("0");
         app.open_after = get("open_after").as_deref() == Some("1");
+        app.preview_open = get("preview").as_deref() == Some("1");
         app.last_update_check = get("last_update_check").and_then(|v| v.parse().ok()).unwrap_or(0);
         if let Some(k) = get("sort_key") {
             app.sort_key = match k.as_str() {
@@ -574,6 +597,7 @@ impl App {
         storage.set_string("show_system", if self.show_system { "1" } else { "0" }.into());
         storage.set_string("auto_update", if self.auto_update { "1" } else { "0" }.into());
         storage.set_string("open_after", if self.open_after { "1" } else { "0" }.into());
+        storage.set_string("preview", if self.preview_open { "1" } else { "0" }.into());
         storage.set_string("last_update_check", self.last_update_check.to_string());
         storage.set_string("zip_codepage", ziptool_core::zip_codepage().map(|c| c.to_string()).unwrap_or_default());
     }
@@ -1075,6 +1099,99 @@ impl App {
         }
     }
 
+    /// 依目前選取的單一檔案更新預覽：選取改變時在背景讀取（壓縮檔內的檔案先解到暫存資料夾）
+    fn update_preview(&mut self, ctx: &egui::Context) {
+        let row = match self.selected_rows().as_slice() {
+            [r] if !r.is_dir && !r.is_drive => (*r).clone(),
+            _ => {
+                self.preview = None;
+                return;
+            }
+        };
+        let key = format!("{}|{}", self.loc.display(), row.name);
+        if self.preview.as_ref().is_some_and(|p| p.key == key) {
+            if let Some(p) = &mut self.preview
+                && let PreviewState::Loading(h) = &p.state
+            {
+                if h.is_finished() {
+                    let PreviewState::Loading(h) = std::mem::replace(&mut p.state, PreviewState::Ready(preview::Content::Unavailable(String::new())))
+                    else {
+                        unreachable!()
+                    };
+                    p.state = PreviewState::Ready(h.join().unwrap_or_else(|_| preview::Content::Unavailable("讀取時發生異常".into())));
+                } else {
+                    ctx.request_repaint_after(Duration::from_millis(50));
+                }
+            }
+            return;
+        }
+        let state = if preview::kind(&row.name).is_none() {
+            PreviewState::Ready(preview::Content::Unavailable(String::new()))
+        } else {
+            match &self.loc {
+                Location::Dir(d) => {
+                    let path = d.join(&row.name);
+                    PreviewState::Loading(std::thread::spawn(move || preview::load(&path)))
+                }
+                Location::Archive { path, inner } if row.size.unwrap_or(0) <= preview::MAX_ARCHIVE_PREVIEW => {
+                    let (archive, strip, entry) = (path.clone(), inner.clone(), self.inner_name(&row));
+                    let password = self.cache.as_ref().and_then(|c| c.password.clone());
+                    PreviewState::Loading(std::thread::spawn(move || preview_inside(&archive, &entry, &strip, password)))
+                }
+                Location::Archive { .. } => PreviewState::Ready(preview::Content::Unavailable(format!(
+                    "超過 {} 的檔案不預覽",
+                    ziptool_core::format_size(preview::MAX_ARCHIVE_PREVIEW)
+                ))),
+                Location::Computer => return,
+            }
+        };
+        self.preview = Some(Preview { key, name: row.display.clone(), size: row.size, modified: row.modified, state, texture: None });
+    }
+
+    fn preview_pane(&mut self, ui: &mut egui::Ui) {
+        let p = pal(ui);
+        let Some(pv) = &mut self.preview else {
+            ui.centered_and_justified(|ui| ui.label(RichText::new("選取檔案以預覽").color(p.text2)));
+            return;
+        };
+        ui.add(egui::Label::new(RichText::new(&pv.name).strong().color(p.text)).wrap());
+        let mut info = vec![];
+        if let Some(sz) = pv.size {
+            info.push(human(sz));
+        }
+        if let PreviewState::Ready(preview::Content::Image(_, [w, h])) = &pv.state {
+            info.insert(0, format!("{w} × {h}"));
+        }
+        if pv.modified.is_some() {
+            info.push(format_time(pv.modified));
+        }
+        ui.label(RichText::new(info.join("・")).size(12.0).color(p.text2));
+        ui.add_space(8.0);
+        match &pv.state {
+            PreviewState::Loading(_) => {
+                ui.add(egui::Spinner::new().color(p.accent));
+            }
+            PreviewState::Ready(preview::Content::Image(img, _)) => {
+                let tex = pv.texture.get_or_insert_with(|| ui.ctx().load_texture("preview", img.clone(), egui::TextureOptions::LINEAR));
+                let avail = ui.available_size();
+                let [w, h] = img.size.map(|v| v as f32);
+                let scale = (avail.x / w).min(avail.y / h).min(1.0);
+                ui.image((tex.id(), vec2(w * scale, h * scale)));
+            }
+            PreviewState::Ready(preview::Content::Text { text, truncated }) => {
+                egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
+                    ui.add(egui::Label::new(RichText::new(text.as_str()).monospace().size(12.5).color(p.text)).selectable(true).extend());
+                    if *truncated {
+                        ui.label(RichText::new("（只顯示開頭的部分）").size(12.0).color(p.text2));
+                    }
+                });
+            }
+            PreviewState::Ready(preview::Content::Unavailable(why)) => {
+                ui.label(RichText::new(if why.is_empty() { "這種檔案無法預覽" } else { why.as_str() }).color(p.text2));
+            }
+        }
+    }
+
     /// 開始偵測從壓縮檔內開啟的檔案。解出的檔名與項目名稱不同時（名稱被清理過）不偵測，避免存回成另一個項目
     fn watch(&mut self, archive: PathBuf, entry: String, file: PathBuf, password: Option<String>) {
         let base = entry.rsplit('/').next().unwrap_or(&entry);
@@ -1265,6 +1382,7 @@ impl App {
             }
         }
         ui.separator();
+        ui.checkbox(&mut self.preview_open, "預覽窗格\tAlt+P").on_hover_text("在右側預覽選取的圖片或文字檔");
         if ui
             .checkbox(&mut self.show_system, "顯示受保護的系統項目")
             .on_hover_text("例如家目錄中的 My Documents、Application Data 等相容性連結；檔案總管預設也不顯示")
@@ -1615,7 +1733,7 @@ impl App {
         };
 
         let mut table = TableBuilder::new(ui)
-            .id_salt(("files", in_archive))
+            .id_salt(("files", in_archive, self.preview_open))
             .striped(false)
             .resizable(true)
             .sense(Sense::click_and_drag())
@@ -1820,6 +1938,10 @@ impl App {
         let (alt_left, alt_right) = ctx.input(|i| (i.modifiers.alt && i.key_pressed(Key::ArrowLeft), i.modifiers.alt && i.key_pressed(Key::ArrowRight)));
         if ctx.input(|i| i.key_pressed(Key::Delete)) && matches!(self.loc, Location::Archive { .. }) && !self.sel.is_empty() {
             return self.cmd_delete();
+        }
+        if ctx.input(|i| i.modifiers.alt && i.key_pressed(Key::P)) {
+            self.preview_open = !self.preview_open;
+            return;
         }
         if alt_left {
             return self.go_back();
@@ -2317,6 +2439,25 @@ fn is_executable(name: &str) -> bool {
     name.rsplit_once('.').is_some_and(|(_, e)| EXT.contains(&e.to_ascii_lowercase().as_str()))
 }
 
+/// 解出壓縮檔內的單一檔案到暫存資料夾後讀取預覽，再刪除暫存資料夾
+fn preview_inside(archive: &Path, entry: &str, strip: &str, password: Option<String>) -> preview::Content {
+    let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let dir = std::env::temp_dir().join("Zipo").join(format!("{}-preview-{stamp}", std::process::id()));
+    let opts = ziptool_core::ExtractOptions { password, selection: Some(vec![entry.to_string()]), strip_prefix: strip.to_string(), ..Default::default() };
+    let content = match ziptool_core::extract(archive, &dir, &opts, &ziptool_core::NoProgress) {
+        Ok(r) if r.issues.is_empty() => {
+            let rel = entry.strip_prefix(&format!("{strip}/")).unwrap_or(entry);
+            let file = dir.join(rel);
+            if file.is_file() { preview::load(&file) } else { preview::Content::Unavailable("無法讀取這個項目".into()) }
+        }
+        Ok(r) => preview::Content::Unavailable(r.issues.first().map(|i| i.reason.clone()).unwrap_or_default()),
+        Err(Error::PasswordRequired | Error::WrongPassword) => preview::Content::Unavailable("需要密碼才能預覽".into()),
+        Err(e) => preview::Content::Unavailable(e.to_string()),
+    };
+    let _ = std::fs::remove_dir_all(&dir);
+    content
+}
+
 /// 拖曳到程式外時先解壓縮的大小上限（解壓縮期間畫面會停住）
 const DRAG_OUT_MAX: u64 = 256 << 20;
 
@@ -2454,6 +2595,16 @@ impl eframe::App for App {
         egui::Panel::top("command").frame(chrome.inner_margin(egui::Margin { left: x - 12, right: 12, top: 8, bottom: 4 })).show(ui, |ui| self.command_bar(ui));
         egui::Panel::top("address").frame(chrome.inner_margin(egui::Margin { left: x - 9, right: 12, top: 4, bottom: 8 })).show(ui, |ui| self.address_bar(ui));
         egui::Panel::bottom("status").frame(chrome.inner_margin(egui::Margin { left: x + 1, right: 12, top: 4, bottom: 4 })).show(ui, |ui| self.status_bar(ui));
+        if self.preview_open {
+            self.update_preview(&ctx);
+            egui::Panel::right("preview")
+                .resizable(true)
+                .default_size(320.0)
+                .min_size(220.0)
+                .max_size(640.0)
+                .frame(egui::Frame::new().fill(p.bg).inner_margin(16))
+                .show(ui, |ui| self.preview_pane(ui));
+        }
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(p.bg).inner_margin(egui::Margin { left: 4, right: 4, top: 0, bottom: 0 }))
             .show(ui, |ui| {
@@ -2509,6 +2660,7 @@ impl App {
                         self.dialog = Some(Dialog::UpdateAvailable(update::Release { version: "0.3.0".into(), page, asset: Some(asset) }));
                     }
                     "updating" => self.dialog = Some(Dialog::Updating),
+                    "preview" => self.preview_open = true,
                     "saveback" => {
                         let file = std::env::temp_dir().join("報告.docx");
                         self.watched.push(Watched { archive: "專案資料.zip".into(), entry: "報告.docx".into(), file, stamp: None, password: None });
@@ -3675,5 +3827,82 @@ mod save_back_tests {
         app.find_modified();
         assert!(app.dialog.is_none());
         assert_eq!(content(&ar, "docs/report.txt"), ("v2".to_string(), 1));
+    }
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+
+    fn wait(app: &mut App, ctx: &egui::Context) {
+        for _ in 0..800 {
+            app.poll(ctx);
+            if app.loading.is_none() && app.job.is_none() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("逾時");
+    }
+
+    /// 選取某一列並等預覽讀完
+    fn preview_of<'a>(app: &'a mut App, ctx: &egui::Context, name: &str) -> &'a preview::Content {
+        app.sel = [app.rows.iter().position(|r| r.name == name).unwrap()].into();
+        for _ in 0..800 {
+            app.update_preview(ctx);
+            if matches!(app.preview.as_ref().map(|p| &p.state), Some(PreviewState::Ready(_))) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        match &app.preview.as_ref().unwrap().state {
+            PreviewState::Ready(c) => c,
+            PreviewState::Loading(_) => panic!("預覽逾時"),
+        }
+    }
+
+    #[test]
+    fn previews_inside_archive() {
+        let t = tempfile::tempdir().unwrap();
+        let root = real_path(t.path());
+        let src = root.join("src");
+        std::fs::create_dir_all(src.join("docs")).unwrap();
+        image::RgbImage::from_pixel(40, 30, image::Rgb([0, 120, 200])).save(src.join("docs/pic.png")).unwrap();
+        std::fs::write(src.join("docs/note.txt"), "預覽內容").unwrap();
+        std::fs::write(src.join("docs/tool.exe"), "MZ").unwrap();
+        let ar = root.join("p.zip");
+        ziptool_core::compress(&[src.join("docs")], &ar, Format::Zip, &Default::default(), &ziptool_core::NoProgress).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = App::new(Some(ar.clone()));
+        wait(&mut app, &ctx);
+        app.navigate(Location::Archive { path: ar, inner: "docs".into() });
+        app.preview_open = true;
+
+        assert!(matches!(preview_of(&mut app, &ctx, "pic.png"), preview::Content::Image(_, [40, 30])));
+        assert!(matches!(preview_of(&mut app, &ctx, "note.txt"), preview::Content::Text { text, truncated: false } if text == "預覽內容"));
+        assert!(matches!(preview_of(&mut app, &ctx, "tool.exe"), preview::Content::Unavailable(m) if m.is_empty()));
+
+        // 沒有選取或選取多個：不預覽
+        app.sel = [0, 1].into();
+        app.update_preview(&ctx);
+        assert!(app.preview.is_none());
+
+        // 太大的檔案：不解壓縮
+        let i = app.rows.iter().position(|r| r.name == "pic.png").unwrap();
+        app.rows[i].size = Some(preview::MAX_ARCHIVE_PREVIEW + 1);
+        app.sel = [i].into();
+        app.update_preview(&ctx);
+        assert!(matches!(&app.preview.as_ref().unwrap().state, PreviewState::Ready(preview::Content::Unavailable(m)) if m.contains("不預覽")));
+    }
+
+    #[test]
+    fn previews_files_on_disk() {
+        let t = tempfile::tempdir().unwrap();
+        let root = real_path(t.path());
+        std::fs::write(root.join("a.md"), "# 標題").unwrap();
+        let ctx = egui::Context::default();
+        let mut app = App::new(Some(root));
+        app.preview_open = true;
+        assert!(matches!(preview_of(&mut app, &ctx, "a.md"), preview::Content::Text { text, .. } if text == "# 標題"));
     }
 }
