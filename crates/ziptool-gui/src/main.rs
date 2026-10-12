@@ -14,6 +14,7 @@ mod localize;
 mod perf;
 mod shell;
 mod theme;
+mod update;
 mod widgets;
 
 use std::collections::BTreeSet;
@@ -131,6 +132,10 @@ fn run_app() -> eframe::Result {
             };
             let mut app = App::with_storage(open, cc.storage);
             app.apply_start(start);
+            if let Ok(exe) = std::env::current_exe() {
+                update::cleanup_old(&exe);
+            }
+            app.auto_update_check();
             #[cfg(debug_assertions)]
             if let Some((shot, setup)) = devshot::DevShot::from_env(&cc.egui_ctx) {
                 if let Some(p) = setup.open {
@@ -336,6 +341,16 @@ enum Dialog {
     /// 更新壓縮檔（加入或刪除項目）前確認
     ConfirmUpdate { task: Task, title: String, message: String, danger: bool },
     About,
+    /// 有新版本可以更新
+    UpdateAvailable(update::Release),
+    /// 正在下載並安裝更新
+    Updating,
+}
+
+/// 線上更新的背景工作
+enum UpdateWork {
+    Check { manual: bool, handle: std::thread::JoinHandle<Result<update::Release, String>> },
+    Install(std::thread::JoinHandle<Result<PathBuf, String>>),
 }
 
 /// 工具列每個按鈕是否可用
@@ -392,6 +407,13 @@ struct App {
     add_level: usize,
     /// 顯示「隱藏＋系統」屬性的項目（預設與檔案總管相同，不顯示）
     show_system: bool,
+    /// 啟動時自動檢查更新（每天最多一次）
+    auto_update: bool,
+    /// 上次檢查更新的時間（Unix 秒）
+    last_update_check: u64,
+    update_work: Option<UpdateWork>,
+    /// 自動檢查找到的新版本，等目前沒有其他對話框或工作時再顯示
+    pending_release: Option<update::Release>,
     /// 效能診斷（設定 ZIPTOOL_PERF 時啟用）
     #[cfg(debug_assertions)]
     perf: Option<perf::Perf>,
@@ -434,12 +456,18 @@ impl App {
             add_format: Format::SevenZ,
             add_level: 3,
             show_system: false,
+            auto_update: true,
+            last_update_check: 0,
+            update_work: None,
+            pending_release: None,
             #[cfg(debug_assertions)]
             perf: perf::Perf::from_env(),
             #[cfg(debug_assertions)]
             devshot: None,
         };
         let get = |k: &str| storage.and_then(|s| s.get_string(k));
+        app.auto_update = get("auto_update").as_deref() != Some("0");
+        app.last_update_check = get("last_update_check").and_then(|v| v.parse().ok()).unwrap_or(0);
         if let Some(k) = get("sort_key") {
             app.sort_key = match k.as_str() {
                 "size" => SortKey::Size,
@@ -511,6 +539,8 @@ impl App {
         storage.set_string("add_format", self.add_format.name().into());
         storage.set_string("add_level", self.add_level.to_string());
         storage.set_string("show_system", if self.show_system { "1" } else { "0" }.into());
+        storage.set_string("auto_update", if self.auto_update { "1" } else { "0" }.into());
+        storage.set_string("last_update_check", self.last_update_check.to_string());
         storage.set_string("zip_codepage", ziptool_core::zip_codepage().map(|c| c.to_string()).unwrap_or_default());
     }
 
@@ -723,6 +753,70 @@ impl App {
     }
 
     // ---------- 指令 ----------
+
+    /// 啟動時的自動檢查：開啟此功能且距離上次檢查超過一天才連線
+    fn auto_update_check(&mut self) {
+        let now = unix_now();
+        if self.auto_update && now.saturating_sub(self.last_update_check) >= update::CHECK_INTERVAL_SECS {
+            self.start_update_check(false);
+        }
+    }
+
+    fn start_update_check(&mut self, manual: bool) {
+        if self.update_work.is_some() {
+            return;
+        }
+        self.last_update_check = unix_now();
+        self.update_work = Some(UpdateWork::Check { manual, handle: std::thread::spawn(update::check) });
+    }
+
+    fn start_update_install(&mut self, release: update::Release) {
+        let Ok(exe) = std::env::current_exe() else {
+            return self.notice("無法更新", "找不到目前執行的程式。");
+        };
+        self.update_work = Some(UpdateWork::Install(std::thread::spawn(move || update::download_and_install(&release, &exe))));
+        self.dialog = Some(Dialog::Updating);
+    }
+
+    /// 處理線上更新的背景工作結果
+    fn poll_update(&mut self, ctx: &egui::Context) {
+        let finished = match &self.update_work {
+            Some(UpdateWork::Check { handle, .. }) => handle.is_finished(),
+            Some(UpdateWork::Install(handle)) => handle.is_finished(),
+            None => false,
+        };
+        if self.update_work.is_some() && !finished {
+            ctx.request_repaint_after(Duration::from_millis(200));
+        }
+        if finished {
+            match self.update_work.take() {
+                Some(UpdateWork::Check { manual, handle }) => match handle.join().unwrap_or_else(|_| Err("檢查更新時發生異常".into())) {
+                    Ok(r) if update::is_newer(&r.version, env!("CARGO_PKG_VERSION")) => self.pending_release = Some(r),
+                    Ok(_) if manual => self.notice("已是最新版本", format!("目前使用的 Zipo {} 已是最新版本。", env!("CARGO_PKG_VERSION"))),
+                    Err(e) if manual => self.notice("無法檢查更新", e),
+                    // 自動檢查失敗（例如沒有網路）不打擾使用者
+                    _ => {}
+                },
+                Some(UpdateWork::Install(handle)) => match handle.join().unwrap_or_else(|_| Err("更新時發生異常".into())) {
+                    Ok(exe) => {
+                        if let Err(e) = std::process::Command::new(&exe).spawn() {
+                            self.notice("更新完成", format!("新版本已安裝，但無法自動重新啟動（{e}）。請手動開啟 Zipo。"));
+                        } else {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                    }
+                    Err(e) => {
+                        self.dialog = None;
+                        self.notice("更新失敗", format!("{e}\n\n原本的程式沒有變動。"));
+                    }
+                },
+                None => {}
+            }
+        }
+        if self.dialog.is_none() && self.job.is_none() && let Some(r) = self.pending_release.take() {
+            self.dialog = Some(Dialog::UpdateAvailable(r));
+        }
+    }
 
     fn notice(&mut self, title: &str, message: impl Into<String>) {
         self.dialog = Some(Dialog::Notice { title: title.into(), message: message.into(), ok: false, open_dir: None, issues: Vec::new() });
@@ -1094,6 +1188,11 @@ impl App {
             }
         }
         ui.separator();
+        let checking = matches!(self.update_work, Some(UpdateWork::Check { .. }));
+        if ui.add_enabled(!checking, egui::Button::new(format!("{}  檢查更新…", icon::ARROWS_CLOCKWISE))).clicked() {
+            self.start_update_check(true);
+        }
+        ui.checkbox(&mut self.auto_update, "啟動時自動檢查更新");
         if ui.button(format!("{}  關於 Zipo", icon::INFO)).clicked() {
             self.dialog = Some(Dialog::About);
         }
@@ -1778,6 +1877,57 @@ impl App {
                 let (ok, cancel) = dialog_buttons_single(ui);
                 keep = !(ok || cancel);
             }
+            Dialog::UpdateAvailable(release) => {
+                let p = pal(ui);
+                ui.set_width(440.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(icon::ARROW_CIRCLE_UP).size(22.0).color(p.accent));
+                    ui.label(RichText::new(format!("有新版本：Zipo {}", release.version)).size(16.0).strong().color(p.text));
+                });
+                ui.add_space(8.0);
+                let detail = match &release.asset {
+                    Some(a) => format!(
+                        "目前使用的是 {}。
+更新檔約 {}，驗證完整後會取代程式並自動重新啟動。",
+                        env!("CARGO_PKG_VERSION"),
+                        ziptool_core::format_size(a.size)
+                    ),
+                    None => format!("目前使用的是 {}。
+這個版本需要到下載頁面手動更新。", env!("CARGO_PKG_VERSION")),
+                };
+                ui.add(egui::Label::new(RichText::new(detail).color(p.text)).wrap());
+                if link(ui, "查看更新內容").clicked() {
+                    open_path(Path::new(&release.page));
+                }
+                ui.add_space(6.0);
+                let (mut go, mut later) = (false, false);
+                ui.allocate_ui_with_layout(vec2(ui.available_width(), 32.0), Layout::right_to_left(Align::Center), |ui| {
+                    later = ui.add(secondary_button(ui, "稍後")).clicked();
+                    go = ui.add(primary_button(ui, if release.asset.is_some() { "立即更新" } else { "開啟下載頁面" })).clicked();
+                });
+                later |= ui.input(|i| i.key_pressed(Key::Escape));
+                if go {
+                    if release.asset.is_some() {
+                        let r = release.clone();
+                        self.start_update_install(r);
+                    } else {
+                        open_path(Path::new(&release.page));
+                    }
+                }
+                keep = !(go || later);
+            }
+            Dialog::Updating => {
+                let p = pal(ui);
+                ui.set_width(400.0);
+                ui.horizontal(|ui| {
+                    ui.add(egui::Spinner::new().size(20.0).color(p.accent));
+                    ui.label(RichText::new("正在更新 Zipo…").size(16.0).strong().color(p.text));
+                });
+                ui.add_space(8.0);
+                ui.label(RichText::new("正在下載並驗證更新檔，完成後會自動重新啟動。").color(p.text2));
+                // 更新完成或失敗時由 poll_update 換成其他對話框
+                keep = true;
+            }
         });
         // 進行中的對話框不因點擊背景而關閉，避免誤觸
         let _ = resp.should_close();
@@ -1913,6 +2063,10 @@ fn is_executable(name: &str) -> bool {
     name.rsplit_once('.').is_some_and(|(_, e)| EXT.contains(&e.to_ascii_lowercase().as_str()))
 }
 
+fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
 /// 清除開啟壓縮檔內檔案時留下的暫存資料夾：
 /// `only_mine` 為真時刪除本程序建立的；否則刪除超過一天的舊資料夾（上次異常結束留下的）。
 /// 檔案仍被其他程式開著時刪除會失敗，直接略過。
@@ -1988,6 +2142,7 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
         self.poll(&ctx);
+        self.poll_update(&ctx);
         self.handle_drops(&ctx);
         self.keyboard(&ctx);
         #[cfg(not(debug_assertions))]
@@ -2056,6 +2211,12 @@ impl App {
                     "info" => self.cmd_info(),
                     "delete" => self.cmd_delete(),
                     "about" => self.dialog = Some(Dialog::About),
+                    "update" => {
+                        let asset = update::Asset { name: "zipo.zip".into(), url: String::new(), sha256: "0".repeat(64), size: 9_200_000 };
+                        let page = "https://github.com/omni624562/zipo/releases".into();
+                        self.dialog = Some(Dialog::UpdateAvailable(update::Release { version: "0.3.0".into(), page, asset: Some(asset) }));
+                    }
+                    "updating" => self.dialog = Some(Dialog::Updating),
                     "test" => self.cmd_test(),
                     "compress-run" => self.spawn(compress(5)),
                     "progress-compress" => self.spawn(compress(9)),
@@ -2474,12 +2635,15 @@ mod phase3_tests {
             app.sort_asc = false;
             app.add_format = Format::Zip;
             app.add_level = 5;
+            app.auto_update = false;
+            app.last_update_check = 1234;
             app.save_settings(&mut store);
         }
         let app = App::with_storage(None, Some(&store));
         assert_eq!(app.loc, Location::Dir(root.join("sub")));
         assert_eq!((app.sort_key, app.sort_asc), (SortKey::Size, false));
         assert_eq!((app.add_format, app.add_level), (Format::Zip, 5));
+        assert_eq!((app.auto_update, app.last_update_check), (false, 1234));
 
         // 記住的資料夾已被刪除：改回家目錄，不出錯
         let mut gone = MemStorage::default();
@@ -2844,5 +3008,74 @@ mod crumb_tests {
         let tail: Vec<_> = crumbs.iter().rev().take(3).map(|(l, _)| l.as_str()).collect();
         assert_eq!(tail, ["y", "x", "a.zip"]);
         assert_eq!(crumbs.last().unwrap().1, Location::Archive { path: ar, inner: "x/y".into() });
+    }
+}
+
+#[cfg(test)]
+mod update_ui_tests {
+    use super::*;
+
+    fn release(v: &str) -> update::Release {
+        update::Release { version: v.into(), page: "https://github.com/omni624562/zipo/releases".into(), asset: None }
+    }
+
+    /// 讓背景檢查直接回傳指定結果，再處理到完成
+    fn finish_check(app: &mut App, ctx: &egui::Context, manual: bool, result: Result<update::Release, String>) {
+        let handle = std::thread::spawn(move || result);
+        while !handle.is_finished() {
+            std::thread::yield_now();
+        }
+        app.update_work = Some(UpdateWork::Check { manual, handle });
+        app.poll_update(ctx);
+    }
+
+    #[test]
+    fn update_check_results() {
+        let t = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+
+        // 有新版本：顯示更新對話框
+        let mut app = App::new(Some(t.path().to_path_buf()));
+        finish_check(&mut app, &ctx, false, Ok(release("999.0.0")));
+        assert!(matches!(&app.dialog, Some(Dialog::UpdateAvailable(r)) if r.version == "999.0.0"));
+
+        // 手動檢查、已是最新：告知使用者；自動檢查則不打擾
+        let mut app = App::new(Some(t.path().to_path_buf()));
+        finish_check(&mut app, &ctx, true, Ok(release(env!("CARGO_PKG_VERSION"))));
+        assert!(matches!(&app.dialog, Some(Dialog::Notice { title, .. }) if title == "已是最新版本"));
+        let mut app = App::new(Some(t.path().to_path_buf()));
+        finish_check(&mut app, &ctx, false, Ok(release(env!("CARGO_PKG_VERSION"))));
+        assert!(app.dialog.is_none());
+
+        // 自動檢查失敗（例如沒有網路）不打擾；手動檢查則顯示原因
+        let mut app = App::new(Some(t.path().to_path_buf()));
+        finish_check(&mut app, &ctx, false, Err("無法連線".into()));
+        assert!(app.dialog.is_none());
+        let mut app = App::new(Some(t.path().to_path_buf()));
+        finish_check(&mut app, &ctx, true, Err("無法連線".into()));
+        assert!(matches!(&app.dialog, Some(Dialog::Notice { title, .. }) if title == "無法檢查更新"));
+
+        // 已有其他對話框時先等待，關閉後才顯示
+        let mut app = App::new(Some(t.path().to_path_buf()));
+        app.dialog = Some(Dialog::About);
+        finish_check(&mut app, &ctx, false, Ok(release("999.0.0")));
+        assert!(matches!(app.dialog, Some(Dialog::About)));
+        app.dialog = None;
+        app.poll_update(&ctx);
+        assert!(matches!(app.dialog, Some(Dialog::UpdateAvailable(_))));
+    }
+
+    /// 自動檢查每天最多一次，關閉後不檢查
+    #[test]
+    fn auto_check_is_rate_limited() {
+        let t = tempfile::tempdir().unwrap();
+        let mut app = App::new(Some(t.path().to_path_buf()));
+        app.last_update_check = unix_now();
+        app.auto_update_check();
+        assert!(app.update_work.is_none(), "一天內不應再檢查");
+        app.auto_update = false;
+        app.last_update_check = 0;
+        app.auto_update_check();
+        assert!(app.update_work.is_none(), "關閉自動檢查時不應連線");
     }
 }
