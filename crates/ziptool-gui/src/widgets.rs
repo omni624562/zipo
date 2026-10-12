@@ -129,7 +129,13 @@ pub fn password_field(ui: &mut egui::Ui, value: &mut String, show: bool, hint: &
                 .desired_width(ui.available_width()),
         ));
     });
-    resp.unwrap()
+    let resp = resp.unwrap();
+    // 密碼欄不保留復原紀錄：egui 會把每次的內容以明文存在記憶體中，對話框關閉後仍在
+    if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), resp.id) {
+        state.clear_undoer();
+        state.store(ui.ctx(), resp.id);
+    }
+    resp
 }
 
 /// 進度條：4 px 高、2 px 圓角（Windows 11 ProgressBar 樣式）
@@ -172,4 +178,30 @@ pub fn error_text(ui: &mut egui::Ui, msg: &str) {
         ui.label(RichText::new(icon::WARNING_CIRCLE).color(p.danger));
         ui.label(RichText::new(msg).color(p.danger));
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 密碼欄不可保留復原紀錄：egui 會把每次輸入的內容以明文存在記憶體中，對話框關閉後仍在
+    #[test]
+    fn password_field_keeps_no_undo_history() {
+        let ctx = egui::Context::default();
+        let mut pw = String::new();
+        let mut id = None;
+        for text in ["", "secret", "-more", "!"] {
+            let events = if text.is_empty() { vec![] } else { vec![egui::Event::Text(text.into())] };
+            let mut out = ctx.run_ui(egui::RawInput { events, ..Default::default() }, |ui| {
+                let r = password_field(ui, &mut pw, false, "");
+                r.request_focus();
+                id = Some(r.id);
+            });
+            out.textures_delta.clear();
+        }
+        assert_eq!(pw, "secret-more!");
+        let state = egui::TextEdit::load_state(&ctx, id.unwrap()).unwrap();
+        let undo = state.undoer();
+        assert!(!undo.is_in_flux() && format!("{undo:?}").contains("undo count: 0"), "不應留下復原紀錄：{undo:?}");
+    }
 }

@@ -24,13 +24,15 @@ const HELP: &str = "\
   i : 顯示支援的格式
 
 <參數>
-  --       : 之後的引數一律視為檔案名稱
+  --       : 之後的引數一律視為檔案名稱（使用 * 等萬用字元時建議加上，
+             避免以 - 開頭的檔名被當成參數，例如名為 -p123 的檔案變成密碼）
   -ao{a|s|u} : 同名檔處理：a 全部覆寫、s 略過、u 自動改名（未指定時逐一詢問）
   -bd      : 不顯示進度條
   -m{參數} : 壓縮方法參數，支援 -mx{0-9}（或 -mx={0-9}）、-mhe={on|off}、
              -mcp={字碼頁}（舊式 zip 的檔名編碼，例如 950＝Big5、936＝GBK；預設依系統）
   -o{資料夾} : 輸出資料夾
-  -p{密碼} : 設定密碼；只寫 -p 則以互動方式輸入
+  -p{密碼} : 設定密碼；只寫 -p 則以互動方式輸入（建議：寫在命令列的密碼
+             會被其他程式看到，也會留在命令歷程中）
   -r       : 遞迴處理子資料夾（預設即為遞迴，可省略）
   -t{格式} : 壓縮檔格式：7z、zip、tar、tar.gz、tar.bz2、tar.xz、tar.zst、gzip、bzip2、xz、zstd
   -y       : 所有詢問都回答「是」（不互動詢問）
@@ -244,6 +246,10 @@ fn confirm(question: &str) -> bool {
 
 fn prompt_password(confirm: bool) -> anyhow::Result<String> {
     let pw = rpassword::prompt_password("輸入密碼：")?;
+    // 建立加密壓縮檔時不接受空白密碼（等於沒有加密）
+    if confirm && pw.is_empty() {
+        anyhow::bail!("密碼不可空白");
+    }
     if confirm && rpassword::prompt_password("再次輸入密碼：")? != pw {
         anyhow::bail!("兩次輸入的密碼不一致");
     }

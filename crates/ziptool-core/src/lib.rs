@@ -55,7 +55,7 @@ fn zip_message(e: &zip::result::ZipError) -> String {
 }
 
 /// 壓縮選項。
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct CompressOptions {
     /// 壓縮等級 0–9；`None` 表示使用各格式的預設值。
     pub level: Option<u32>,
@@ -78,7 +78,7 @@ pub enum Overwrite {
 }
 
 /// 解壓縮選項。
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct ExtractOptions {
     pub password: Option<String>,
     pub overwrite: Overwrite,
@@ -90,6 +90,34 @@ pub struct ExtractOptions {
     pub flatten: bool,
     /// 允許極高壓縮比（使用者已確認不是壓縮炸彈）。
     pub allow_high_ratio: bool,
+}
+
+/// 除錯輸出不顯示密碼本身，避免被記錄到日誌或錯誤報告中
+fn redacted(pw: &Option<String>) -> &'static str {
+    if pw.is_some() { "Some(<已隱藏>)" } else { "None" }
+}
+
+impl std::fmt::Debug for CompressOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompressOptions")
+            .field("level", &self.level)
+            .field("password", &format_args!("{}", redacted(&self.password)))
+            .field("encrypt_names", &self.encrypt_names)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for ExtractOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExtractOptions")
+            .field("password", &format_args!("{}", redacted(&self.password)))
+            .field("overwrite", &self.overwrite)
+            .field("selection", &self.selection)
+            .field("strip_prefix", &self.strip_prefix)
+            .field("flatten", &self.flatten)
+            .field("allow_high_ratio", &self.allow_high_ratio)
+            .finish()
+    }
 }
 
 /// 壓縮檔內的一個項目。

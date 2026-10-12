@@ -957,3 +957,14 @@ fn max_length_file_names_extract() {
         assert_eq!(fs::read_to_string(out.join("src").join(&long)).unwrap(), "x", "{f:?}");
     }
 }
+
+/// 選項的除錯輸出不可包含密碼
+#[test]
+fn options_debug_hides_password() {
+    let c = CompressOptions { password: Some("TopSecret123".into()), ..Default::default() };
+    let x = ExtractOptions { password: Some("TopSecret123".into()), ..Default::default() };
+    for s in [format!("{c:?}"), format!("{x:?}"), format!("{c:#?}")] {
+        assert!(!s.contains("TopSecret123") && s.contains("已隱藏"), "{s}");
+    }
+    assert!(format!("{:?}", CompressOptions::default()).contains("password: None"));
+}
