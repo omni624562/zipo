@@ -8,6 +8,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# 預設只能讀取儲存庫內容；需要更多權限的工作（audit）個別設定
+permissions:
+  contents: read
+
 jobs:
   test:
     strategy:
