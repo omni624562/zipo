@@ -2518,8 +2518,10 @@ This version must be updated manually from the download page.", env!("CARGO_PKG_
                 egui::ScrollArea::vertical().max_height(360.0).auto_shrink([false, true]).show(ui, |ui| {
                     for (name, h) in rows.iter() {
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new(name.as_str()).strong().color(p.text));
-                            ui.label(RichText::new(human(h.size)).color(p.text2));
+                            let size = human(h.size);
+                            let w = ui.available_width() - 16.0 - ui.fonts_mut(|f| f.layout_no_wrap(size.clone(), egui::FontId::proportional(14.0), p.text2).size().x);
+                            elided_label(ui, name, 14.0, p.text, w);
+                            ui.label(RichText::new(size).color(p.text2));
                         });
                         egui::Grid::new(("hash", name.as_str())).num_columns(3).spacing([12.0, 4.0]).show(ui, |ui| {
                             for (algo, value) in h.all() {
@@ -2603,10 +2605,12 @@ This version must be updated manually from the download page.", env!("CARGO_PKG_
             let p = pal(ui);
             ui.set_width(460.0);
             dialog_title(ui, icon::HOURGLASS_MEDIUM, title);
+            // 名稱太長時從中間省略，保留檔名
+            let w = ui.available_width();
             if !s.stage.is_empty() {
-                ui.label(RichText::new(&s.stage).color(p.text));
+                elided_label(ui, &s.stage, 14.0, p.text, w);
             }
-            ui.add(egui::Label::new(RichText::new(&s.current).size(12.5).color(p.text2)).truncate());
+            elided_label(ui, &s.current, 12.5, p.text2, w);
             ui.add_space(4.0);
             let frac = if s.total > 0 { s.done as f32 / s.total as f32 } else { 0.0 };
             progress_bar(ui, frac);

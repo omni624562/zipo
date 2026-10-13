@@ -130,6 +130,14 @@ pub fn elide_middle(text: &str, max: f32, width: impl Fn(&str) -> f32) -> String
     make(lo)
 }
 
+/// 單行文字：放不下 `max` 寬度時從中間省略（保留結尾的檔名），滑過時顯示完整內容
+pub fn elided_label(ui: &mut egui::Ui, text: &str, size: f32, color: egui::Color32, max: f32) -> egui::Response {
+    let font = FontId::proportional(size);
+    let shown = elide_middle(text, max, |t| ui.fonts_mut(|f| f.layout_no_wrap(t.to_string(), font.clone(), color).size().x));
+    let r = ui.add(egui::Label::new(RichText::new(&shown).size(size).color(color)).selectable(false));
+    if shown != text { r.on_hover_text(text) } else { r }
+}
+
 /// 路徑欄位，回傳是否按下「瀏覽」。
 /// 沒有在編輯時，太長的路徑從中間省略（保留檔名），滑過時顯示完整路徑；點一下即可編輯。
 pub fn path_field(ui: &mut egui::Ui, lead: &str, value: &mut String) -> bool {
