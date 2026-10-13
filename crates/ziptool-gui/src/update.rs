@@ -79,7 +79,7 @@ pub fn parse_release(json: &[u8]) -> Result<Release, String> {
     if parse_version(&version).is_none() {
         return Err(F!("版本號碼格式不正確：{}", "Invalid version number: {}", r.tag_name));
     }
-    if !r.html_url.starts_with(PAGE_PREFIX) {
+    if !url_within(&r.html_url, PAGE_PREFIX) {
         return Err(L!("更新資訊中的網址不正確", "The update information contains an invalid address").into());
     }
     let want = asset_name(&version);
@@ -87,11 +87,16 @@ pub fn parse_release(json: &[u8]) -> Result<Release, String> {
         let sha256 = a.digest?.strip_prefix("sha256:")?.to_ascii_lowercase();
         let ok = sha256.len() == 64
             && sha256.bytes().all(|b| b.is_ascii_hexdigit())
-            && a.browser_download_url.starts_with(DOWNLOAD_PREFIX)
+            && url_within(&a.browser_download_url, DOWNLOAD_PREFIX)
             && a.size <= MAX_DOWNLOAD;
         ok.then_some(Asset { name: a.name, url: a.browser_download_url, sha256, size: a.size })
     });
     Ok(Release { version, page: r.html_url, asset })
+}
+
+/// 網址在 `prefix` 之下，且不含會被 curl 或伺服器解讀成其他位置的字元（../、{}、[]、%、反斜線、空白）
+fn url_within(url: &str, prefix: &str) -> bool {
+    url.strip_prefix(prefix).is_some_and(|rest| !rest.contains("..") && !rest.contains(['{', '}', '[', ']', '%', '\\']) && !rest.contains(char::is_whitespace))
 }
 
 /// 呼叫 curl 下載；`out` 為 `None` 時回傳內容
@@ -101,7 +106,8 @@ fn curl(url: &str, out: Option<&Path>) -> Result<Vec<u8>, String> {
     #[cfg(not(windows))]
     let exe = PathBuf::from("curl");
     let mut cmd = Command::new(exe);
-    cmd.args(["--fail", "--silent", "--show-error", "--location"])
+    // --globoff：網址中的 {} [] 不展開
+    cmd.args(["--fail", "--silent", "--show-error", "--location", "--globoff"])
         // 只允許 HTTPS，轉址也一樣
         .args(["--proto", "=https", "--proto-redir", "=https", "--tlsv1.2"])
         .args(["--connect-timeout", "15", "--max-time", "900"])
@@ -278,6 +284,13 @@ mod tests {
             let r = parse_release(&api_json(name, &u, &d, page)).unwrap();
             assert_eq!(r.asset, None, "{u} {d}");
         }
+        // 前綴相同、但用 ../、{}、[]、%2e 或反斜線跳到其他位置的網址也不採用
+        for tail in ["../../../../other/repo/releases/download/v9.8.7/x.zip", "v9.8.7/{a,b}.zip", "v9.8.7/[1-2].zip", "%2e%2e/%2e%2e/x.zip", "v9.8.7/a b.zip"] {
+            let u = format!("{DOWNLOAD_PREFIX}{tail}");
+            let r = parse_release(&api_json(name, &u, &format!("sha256:{sha}"), page)).unwrap();
+            assert_eq!(r.asset, None, "{u}");
+        }
+        assert!(parse_release(&api_json(name, &url, &format!("sha256:{sha}"), "https://github.com/omni624562/zipo/../../evil/x")).is_err());
         // 說明頁面不在本儲存庫：整個回應不採用
         assert!(parse_release(&api_json(name, &url, &format!("sha256:{sha}"), "https://evil.example/")).is_err());
         assert!(parse_release(b"not json").is_err());
