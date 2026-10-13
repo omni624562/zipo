@@ -688,19 +688,30 @@ impl App {
             StartAction::None | StartAction::Open(_) => {}
             StartAction::Add(paths) => {
                 self.navigate(Location::Dir(parent(&paths[0])));
+                self.select_names(&paths);
                 self.dialog = Some(Dialog::Add(self.with_open_after_add(AddDialog::new(paths, self.add_format, self.add_level))));
             }
             StartAction::ExtractHere(archives) => {
                 let dir = parent(&archives[0]);
                 self.navigate(Location::Dir(dir.clone()));
+                self.select_names(&archives);
                 let opts = ziptool_core::ExtractOptions { overwrite: ziptool_core::Overwrite::Ask, ..Default::default() };
                 self.spawn(Task::Extract { archives, dest: dir, opts, smart: false, here: true, then: Then::default() });
             }
             StartAction::ExtractFolder(archives) => {
                 self.navigate(Location::Dir(parent(&archives[0])));
+                self.select_names(&archives);
                 self.dialog = Some(Dialog::Extract(self.with_open_after_extract(ExtractDialog::new(ExtractSource::Files(archives), None))));
             }
         }
+    }
+
+    /// 選取清單中與 `paths` 同名的項目，並捲動到第一個（從右鍵選單啟動時，看得出這次處理的是哪幾個檔案）
+    fn select_names(&mut self, paths: &[PathBuf]) {
+        let names: Vec<String> = paths.iter().map(|p| file_name(p)).collect();
+        self.sel = self.rows.iter().enumerate().filter(|(_, r)| names.contains(&r.name)).map(|(i, _)| i).collect();
+        self.anchor = self.sel.first().copied();
+        self.scroll_to = self.anchor;
     }
 
     fn save_settings(&self, storage: &mut dyn eframe::Storage) {
@@ -3742,6 +3753,30 @@ mod start_tests {
         let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/ziptool-256.png")).unwrap();
         assert_eq!((icon.width, icon.height), (256, 256));
         assert!(icon.rgba.chunks(4).any(|p| p[3] == 255), "圖示不應是全透明");
+    }
+
+    /// 從右鍵選單啟動：背後的清單選取這次要處理的檔案，並捲動到第一個（與檔案總管相同，看得出是哪幾個）
+    #[test]
+    fn context_menu_selects_the_files_in_the_list() {
+        let t = tempfile::tempdir().unwrap();
+        let root = real_path(t.path());
+        for i in 0..30 {
+            std::fs::create_dir(root.join(format!("資料夾{i:02}"))).unwrap();
+        }
+        for n in ["甲.jpg", "乙.pdf", "丙.txt"] {
+            std::fs::write(root.join(n), "x").unwrap();
+        }
+        let mut app = App::new(None);
+        app.apply_start(StartAction::Add(vec![root.join("丙.txt"), root.join("甲.jpg")]));
+        let mut picked: Vec<&str> = app.sel.iter().map(|&i| app.rows[i].name.as_str()).collect();
+        picked.sort();
+        assert_eq!(picked, ["丙.txt", "甲.jpg"]);
+        assert!(app.scroll_to.is_some_and(|i| app.sel.contains(&i)), "捲動到選取的項目");
+        assert!(matches!(app.dialog, Some(Dialog::Add(_))));
+
+        let mut app = App::new(None);
+        app.apply_start(StartAction::ExtractFolder(vec![root.join("乙.pdf")]));
+        assert_eq!(app.sel.iter().map(|&i| app.rows[i].name.as_str()).collect::<Vec<_>>(), ["乙.pdf"]);
     }
 
     #[test]
