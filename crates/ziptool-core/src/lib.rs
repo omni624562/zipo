@@ -45,13 +45,13 @@ impl std::fmt::Display for Error {
             Error::Io(e) => describe(e),
             Error::Zip(e) => zip_message(e),
             Error::SevenZ(m) => F!("7z 錯誤：{m}", "7z error: {m}"),
-            Error::UnknownFormat(m) => F!("無法辨識的壓縮格式：{m}", "Unrecognized archive format: {m}"),
+            Error::UnknownFormat(m) => F!("無法辨識的壓縮格式：{m}\n\nZipo 可以開啟 zip、7z、tar、gz、bz2、xz、zst 與 iso。", "Unrecognized archive format: {m}\n\nZipo can open zip, 7z, tar, gz, bz2, xz, zst and iso."),
             Error::Unsupported(m) => m.clone(),
             Error::PasswordRequired => L!("此壓縮檔需要密碼", "This archive requires a password").to_string(),
             Error::WrongPassword => L!("密碼錯誤", "Wrong password").to_string(),
             Error::NotEnoughSpace { need, available } => F!(
-                "磁碟空間不足：需要 {}，目前可用 {}",
-                "Not enough disk space: {} needed, {} available",
+                "磁碟空間不足：需要 {}，目前可用 {}。請清出空間，或改解壓縮到其他磁碟。",
+                "Not enough disk space: {} needed, {} available. Free up space or extract to another drive.",
                 format_size(*need),
                 format_size(*available)
             ),
@@ -96,7 +96,7 @@ fn zip_message(e: &zip::result::ZipError) -> String {
     use zip::result::ZipError::*;
     match e {
         Io(e) => describe(e),
-        InvalidArchive(_) => L!("不是有效的 ZIP 檔，或檔案已損壞", "Not a valid ZIP file, or the file is damaged").into(),
+        InvalidArchive(_) => L!("不是有效的 ZIP 檔，或檔案已損壞。檔案可能沒有下載完整，請重新下載。", "Not a valid ZIP file, or the file is damaged. It may not have downloaded completely; try downloading it again.").into(),
         UnsupportedArchive(m) => F!("不支援的 ZIP 功能（{m}）", "Unsupported ZIP feature ({m})"),
         FileNotFound => L!("壓縮檔中找不到指定的項目", "The specified item was not found in the archive").into(),
         InvalidPassword => L!("密碼錯誤", "Wrong password").into(),

@@ -189,13 +189,13 @@ pub fn describe(e: &io::Error) -> String {
         return L!("路徑太長", "The path is too long").into();
     }
     match e.kind() {
-        PermissionDenied => L!("權限不足（檔案可能被其他程式使用中，或為唯讀）", "Access denied (the file may be in use by another program, or read-only)").into(),
+        PermissionDenied => L!("權限不足（檔案可能被其他程式使用中，或為唯讀）。請關閉使用中的程式，或改存到其他資料夾。", "Access denied (the file may be in use by another program, or read-only). Close the program using it, or save to another folder.").into(),
         NotFound => L!("找不到檔案或路徑", "File or path not found").into(),
         InvalidFilename => L!("檔名無效或路徑太長", "Invalid file name or path too long").into(),
-        StorageFull => L!("磁碟空間不足", "Not enough disk space").into(),
+        StorageFull => L!("磁碟空間不足，請清出空間後再試", "Not enough disk space; free up space and try again").into(),
         IsADirectory => L!("已有同名的資料夾", "A folder with the same name already exists").into(),
         AlreadyExists => L!("檔案已存在", "The file already exists").into(),
-        InvalidData => F!("壓縮資料損壞或格式錯誤（{e}）", "Compressed data is damaged or invalid ({e})"),
+        InvalidData => F!("壓縮資料損壞或格式錯誤（{e}）。檔案可能沒有下載完整，請重新下載。", "Compressed data is damaged or invalid ({e}). It may not have downloaded completely; try downloading it again."),
         UnexpectedEof => L!("檔案不完整，可能下載或複製時中斷", "The file is incomplete; the download or copy may have been interrupted").into(),
         _ => e.to_string(),
     }

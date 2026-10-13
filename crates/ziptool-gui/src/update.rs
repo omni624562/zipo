@@ -126,7 +126,7 @@ fn curl(url: &str, out: Option<&Path>) -> Result<Vec<u8>, String> {
     let o = cmd.output().map_err(|e| F!("無法執行 curl：{e}", "Cannot run curl: {e}"))?;
     if !o.status.success() {
         let why = String::from_utf8_lossy(&o.stderr).trim().to_string();
-        return Err(F!("無法連線到 GitHub：{why}", "Cannot connect to GitHub: {why}"));
+        return Err(F!("無法連線到 GitHub，請確認網路連線後再試。（{why}）", "Cannot connect to GitHub; check your internet connection and try again. ({why})"));
     }
     Ok(o.stdout)
 }
@@ -173,7 +173,7 @@ fn install_from_zip(zip: &Path, asset: &Asset, unpack: &Path, current_exe: &Path
     }
     let digest = sha256_file(zip).map_err(|e| F!("無法讀取下載的檔案：{e}", "Cannot read the downloaded file: {e}"))?;
     if digest != asset.sha256 {
-        return Err(L!("下載的檔案驗證失敗（SHA-256 不符），可能已損毀或遭竄改，已取消更新", "The downloaded file failed verification (SHA-256 mismatch); it may be damaged or tampered with. The update was cancelled").into());
+        return Err(L!("下載的檔案驗證失敗（SHA-256 不符），可能已損毀或遭竄改，已取消更新。請稍後再試，或到下載頁面手動下載。", "The downloaded file failed verification (SHA-256 mismatch); it may be damaged or tampered with. The update was cancelled. Try again later, or download it manually from the download page.").into());
     }
     ziptool_core::extract(zip, unpack, &Default::default(), &ziptool_core::NoProgress).map_err(|e| F!("無法解開更新檔：{e}", "Cannot unpack the update: {e}"))?;
     let gui = find_file(unpack, "zipo-gui.exe").ok_or(L!("更新檔中找不到 zipo-gui.exe", "zipo-gui.exe was not found in the update"))?;

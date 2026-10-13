@@ -39,7 +39,7 @@ pub fn volume_paths(first: &Path) -> Result<Vec<PathBuf>> {
     for later in n + 1..n + 1000 {
         if volume_path(first, later).is_file() {
             let missing = volume_path(first, n);
-            return Err(Error::Unsupported(F!("缺少分割檔「{}」", "Missing volume \"{}\"", missing.file_name().unwrap_or_default().to_string_lossy())));
+            return Err(Error::Unsupported(F!("缺少分割檔「{}」，請把所有分割檔放在同一個資料夾", "Missing volume \"{}\"; put all volumes in the same folder", missing.file_name().unwrap_or_default().to_string_lossy())));
         }
     }
     Ok(parts)
