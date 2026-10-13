@@ -1082,6 +1082,87 @@ fn make_iso(path: &Path) {
     fs::write(path, buf.into_inner()).unwrap();
 }
 
+/// 惡意 ISO：根目錄有 `s` 個子目錄，各自指向不同起點、但範圍互相重疊的區域，
+/// 區域內塞滿 34 位元組的檔案記錄；項目總數約為 60 × s² / 2，遠多於映像檔大小能容納的數量
+fn make_overlapping_iso(path: &Path, s: u32) {
+    const SEC: usize = 2048;
+    fn both32(v: u32) -> Vec<u8> {
+        [v.to_le_bytes(), v.to_be_bytes()].concat()
+    }
+    fn rec(lba: u32, size: u32, name: &[u8], dir: bool) -> Vec<u8> {
+        let len = (33 + name.len()).next_multiple_of(2);
+        let mut r = vec![len as u8, 0];
+        r.extend(both32(lba));
+        r.extend(both32(size));
+        r.extend([100, 1, 1, 0, 0, 0, 0, if dir { 2 } else { 0 }, 0, 0, 1, 0, 0, 1, name.len() as u8]);
+        r.extend(name);
+        r.resize(len, 0);
+        r
+    }
+    let root_lba = 18u32;
+    let root_sectors = (s as usize * 40) / SEC + 2;
+    let region_lba = root_lba + root_sectors as u32;
+    let root_size = (root_sectors * SEC) as u32;
+    let mut root_dir = Vec::new();
+    root_dir.extend(rec(root_lba, root_size, &[0], true));
+    root_dir.extend(rec(root_lba, root_size, &[1], true));
+    for k in 0..s {
+        root_dir.extend(rec(region_lba + k, (s - k) * SEC as u32, format!("D{k}").as_bytes(), true));
+    }
+    root_dir.resize(root_sectors * SEC, 0);
+    let mut region = Vec::new();
+    for i in 0..s as usize * (SEC / 34) {
+        region.extend(rec(0, 0, &[b'A' + (i % 26) as u8], false));
+        if region.len() % SEC + 34 > SEC {
+            region.resize(region.len().next_multiple_of(SEC), 0);
+        }
+    }
+    region.resize(s as usize * SEC, 0);
+    let total = region_lba + s;
+    let mut pvd = vec![0u8; SEC];
+    pvd[0] = 1;
+    pvd[1..6].copy_from_slice(b"CD001");
+    pvd[6] = 1;
+    pvd[8..72].fill(b' ');
+    pvd[40..44].copy_from_slice(b"BOMB");
+    pvd[80..88].copy_from_slice(&both32(total));
+    pvd[120..128].copy_from_slice(&[1, 0, 0, 1, 1, 0, 0, 1]);
+    pvd[128..132].copy_from_slice(&[0, 8, 8, 0]);
+    pvd[132..140].copy_from_slice(&both32(10));
+    pvd[140..144].copy_from_slice(&total.to_le_bytes());
+    pvd[148..152].copy_from_slice(&total.to_be_bytes());
+    pvd[156..190].copy_from_slice(&rec(root_lba, root_size, &[0], true));
+    pvd[881] = 1;
+    let mut term = vec![0u8; SEC];
+    term[0] = 255;
+    term[1..6].copy_from_slice(b"CD001");
+    term[6] = 1;
+    let mut img = vec![0u8; 16 * SEC];
+    img.extend(pvd);
+    img.extend(term);
+    img.extend(root_dir);
+    img.extend(region);
+    let mut path_table = vec![1, 0];
+    path_table.extend(root_lba.to_le_bytes());
+    path_table.extend([1, 0, 0, 0]);
+    path_table.resize(SEC, 0);
+    img.extend(path_table);
+    fs::write(path, img).unwrap();
+}
+
+/// 目錄範圍互相重疊的惡意 ISO：項目數量超過映像檔能容納的上限時立即停止，不會耗盡記憶體
+#[test]
+fn iso_overlapping_directories_are_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let iso = tmp.path().join("bomb.iso");
+    make_overlapping_iso(&iso, 20);
+    assert!(fs::metadata(&iso).unwrap().len() < 100_000);
+    let Err(e) = list(&iso, None) else { panic!("應拒絕") };
+    assert!(e.to_string().contains("重疊"), "{e}");
+    assert!(extract(&iso, &tmp.path().join("out"), &ExtractOptions::default(), &NoProgress).is_err());
+    assert!(test(&iso, None, &NoProgress).is_err());
+}
+
 /// ISO：列出、解壓縮、測試（中文檔名、子資料夾、較大的檔案）；不可建立或修改
 #[test]
 fn iso_read_only() {

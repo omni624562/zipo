@@ -23,9 +23,15 @@ type Image = IsoImage<BufReader<File>>;
 /// 目錄的最大層數（防止惡意映像檔讓遞迴過深）
 const MAX_DEPTH: usize = 64;
 
-fn open(archive: &Path) -> Result<Image> {
-    let image = IsoImage::open(BufReader::new(File::open(archive)?)).map_err(|e| iso_err(&e, archive))?;
-    Ok(image)
+/// 一筆目錄記錄最少 34 位元組；項目數超過「映像檔大小 ÷ 34」代表目錄互相重疊、同一筆記錄被重複計算
+const MIN_RECORD: u64 = 34;
+
+/// 開啟映像檔；同時回傳項目數量的上限
+fn open(archive: &Path) -> Result<(Image, usize)> {
+    let file = File::open(archive)?;
+    let limit = usize::try_from(file.metadata()?.len() / MIN_RECORD).unwrap_or(usize::MAX).saturating_add(16);
+    let image = IsoImage::open(BufReader::new(file)).map_err(|e| iso_err(&e, archive))?;
+    Ok((image, limit))
 }
 
 /// 函式庫的讀取錯誤轉為一般的 I/O 錯誤
@@ -70,12 +76,20 @@ fn entry_time(entry: &DirEntry) -> Option<SystemTime> {
     Some(dt.into())
 }
 
-/// 依序走訪所有項目：`f(完整名稱, 項目)`
-fn walk(image: &Image, f: &mut dyn FnMut(&str, &DirEntry) -> Result<()>) -> Result<()> {
+/// 依序走訪所有項目：`f(完整名稱, 項目)`；項目數超過 `limit` 時停止並回報錯誤
+fn walk(image: &Image, limit: usize, f: &mut dyn FnMut(&str, &DirEntry) -> Result<()>) -> Result<()> {
     let root = image.root_dirs().try_best_choice().ok_or_else(|| Error::Unsupported(L!("ISO 中沒有目錄", "The ISO has no directory").into()))?;
     let joliet = matches!(root.entry_type(), EntryType::Joliet { .. });
     let mut seen = HashSet::new();
-    walk_dir(image, image.open_dir(root.dir_ref()), "", joliet, 0, &mut seen, f)
+    let mut count = 0usize;
+    let mut counted = |name: &str, e: &DirEntry| {
+        count += 1;
+        if count > limit {
+            return Err(Error::Unsupported(L!("ISO 的目錄互相重疊，項目數量異常，可能是損壞或惡意的檔案", "The ISO directories overlap and contain an abnormal number of items; the file may be damaged or malicious").into()));
+        }
+        f(name, e)
+    };
+    walk_dir(image, image.open_dir(root.dir_ref()), "", joliet, 0, &mut seen, &mut counted)
 }
 
 fn walk_dir(
@@ -143,9 +157,9 @@ fn reader<'a>(image: &'a Image, entry: &DirEntry) -> Result<FileReader<'a>> {
 }
 
 pub(crate) fn list(archive: &Path) -> Result<Vec<Entry>> {
-    let image = open(archive)?;
+    let (image, limit) = open(archive)?;
     let mut out = Vec::new();
-    walk(&image, &mut |name, e| {
+    walk(&image, limit, &mut |name, e| {
         let size = (!e.is_directory()).then(|| e.total_size());
         out.push(Entry { name: name.to_string(), is_dir: e.is_directory(), size, compressed_size: size, modified: entry_time(e), encrypted: false });
         Ok(())
@@ -158,16 +172,16 @@ pub(crate) fn list(archive: &Path) -> Result<Vec<Entry>> {
 }
 
 pub(crate) fn extract(archive: &Path, plan: &Planner, progress: &dyn Progress) -> Result<()> {
-    let image = open(archive)?;
+    let (image, limit) = open(archive)?;
     let mut total = 0u64;
-    walk(&image, &mut |name, e| {
+    walk(&image, limit, &mut |name, e| {
         if !e.is_directory() && plan.selected(name) {
             total = total.saturating_add(e.total_size());
         }
         Ok(())
     })?;
     progress.start(total);
-    walk(&image, &mut |name, e| {
+    walk(&image, limit, &mut |name, e| {
         if !plan.selected(name) {
             return Ok(());
         }
@@ -183,9 +197,9 @@ pub(crate) fn extract(archive: &Path, plan: &Planner, progress: &dyn Progress) -
 }
 
 pub(crate) fn test(archive: &Path, progress: &dyn Progress) -> Result<TestReport> {
-    let image = open(archive)?;
+    let (image, limit) = open(archive)?;
     let mut report = TestReport::default();
-    walk(&image, &mut |name, e| {
+    walk(&image, limit, &mut |name, e| {
         if !e.is_directory() {
             progress.entry(name);
             report.files += 1;
