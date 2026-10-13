@@ -74,13 +74,13 @@ fn asset_name(version: &str) -> Option<String> {
 
 /// 解讀 GitHub API 的回應
 pub fn parse_release(json: &[u8]) -> Result<Release, String> {
-    let r: ApiRelease = serde_json::from_slice(json).map_err(|e| F!("無法解讀更新資訊：{e}", "Cannot read the update information: {e}"))?;
+    let r: ApiRelease = serde_json::from_slice(json).map_err(|e| F!("無法解讀更新資訊，請稍後再試（{e}）", "Cannot read the update information; try again later ({e})"))?;
     let version = r.tag_name.trim_start_matches('v').to_string();
     if parse_version(&version).is_none() {
-        return Err(F!("版本號碼格式不正確：{}", "Invalid version number: {}", r.tag_name));
+        return Err(F!("版本號碼格式不正確（{}），請稍後再試", "Invalid version number ({}); try again later", r.tag_name));
     }
     if !url_within(&r.html_url, PAGE_PREFIX) {
-        return Err(L!("更新資訊中的網址不正確", "The update information contains an invalid address").into());
+        return Err(L!("更新資訊中的網址不正確，請稍後再試", "The update information contains an invalid address; try again later").into());
     }
     let want = asset_name(&version);
     let asset = r.assets.into_iter().find(|a| Some(&a.name) == want.as_ref()).and_then(|a| {
@@ -156,7 +156,7 @@ pub fn download_and_install(release: &Release, current_exe: &Path) -> Result<Pat
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     let work = std::env::temp_dir().join("Zipo").join(format!("update-{}-{stamp}", std::process::id()));
     let r = (|| {
-        std::fs::create_dir_all(&work).map_err(|e| F!("無法建立暫存資料夾：{e}", "Cannot create a temporary folder: {e}"))?;
+        std::fs::create_dir_all(&work).map_err(|e| F!("無法建立暫存資料夾：{e}。請確認磁碟還有空間。", "Cannot create a temporary folder: {e}. Check that the disk has free space."))?;
         let zip = work.join(&asset.name);
         curl(&asset.url, Some(&zip))?;
         install_from_zip(&zip, asset, &work.join("x"), current_exe)
@@ -171,13 +171,13 @@ fn install_from_zip(zip: &Path, asset: &Asset, unpack: &Path, current_exe: &Path
     if size != asset.size {
         return Err(F!("下載的檔案大小不符（{size}，應為 {}）", "The downloaded file has the wrong size ({size}, expected {})", asset.size));
     }
-    let digest = sha256_file(zip).map_err(|e| F!("無法讀取下載的檔案：{e}", "Cannot read the downloaded file: {e}"))?;
+    let digest = sha256_file(zip).map_err(|e| F!("無法讀取下載的檔案：{e}。請再試一次。", "Cannot read the downloaded file: {e}. Please try again."))?;
     if digest != asset.sha256 {
         return Err(L!("下載的檔案驗證失敗（SHA-256 不符），可能已損毀或遭竄改，已取消更新。請稍後再試，或到下載頁面手動下載。", "The downloaded file failed verification (SHA-256 mismatch); it may be damaged or tampered with. The update was cancelled. Try again later, or download it manually from the download page.").into());
     }
-    ziptool_core::extract(zip, unpack, &Default::default(), &ziptool_core::NoProgress).map_err(|e| F!("無法解開更新檔：{e}", "Cannot unpack the update: {e}"))?;
+    ziptool_core::extract(zip, unpack, &Default::default(), &ziptool_core::NoProgress).map_err(|e| F!("無法解開更新檔：{e}。請再試一次，或到下載頁面手動更新。", "Cannot unpack the update: {e}. Try again, or update manually from the download page."))?;
     let gui = find_file(unpack, "zipo-gui.exe").ok_or(L!("更新檔中找不到 zipo-gui.exe", "zipo-gui.exe was not found in the update"))?;
-    let dir = current_exe.parent().ok_or(L!("找不到程式所在的資料夾", "Cannot find the program's folder"))?;
+    let dir = current_exe.parent().ok_or(L!("找不到程式所在的資料夾，請到下載頁面手動更新", "Cannot find the program's folder; update manually from the download page"))?;
     replace_file(&gui, current_exe)?;
     // 同一個資料夾中的命令列版本一併更新
     let cli_target = dir.join("zipo.exe");
@@ -218,7 +218,7 @@ fn replace_file(new: &Path, target: &Path) -> Result<(), String> {
         if e.kind() == std::io::ErrorKind::PermissionDenied {
             F!("沒有權限更新「{}」，請到下載頁面手動更新", "No permission to update \"{}\"; please update manually from the download page", target.parent().unwrap_or(target).display())
         } else {
-            F!("無法更新「{}」：{e}", "Cannot update \"{}\": {e}", target.display())
+            F!("無法更新「{}」：{e}。請關閉其他開啟中的 Zipo 後再試，或到下載頁面手動更新。", "Cannot update \"{}\": {e}. Close any other open Zipo windows and try again, or update manually from the download page.", target.display())
         }
     };
     std::fs::rename(target, &old).map_err(denied)?;

@@ -190,7 +190,7 @@ pub fn describe(e: &io::Error) -> String {
     }
     match e.kind() {
         PermissionDenied => L!("權限不足（檔案可能被其他程式使用中，或為唯讀）。請關閉使用中的程式，或改存到其他資料夾。", "Access denied (the file may be in use by another program, or read-only). Close the program using it, or save to another folder.").into(),
-        NotFound => L!("找不到檔案或路徑", "File or path not found").into(),
+        NotFound => L!("找不到檔案或路徑，可能已被移動或刪除", "File or path not found; it may have been moved or deleted").into(),
         InvalidFilename => L!("檔名無效或路徑太長", "Invalid file name or path too long").into(),
         StorageFull => L!("磁碟空間不足，請清出空間後再試", "Not enough disk space; free up space and try again").into(),
         IsADirectory => L!("已有同名的資料夾", "A folder with the same name already exists").into(),

@@ -44,7 +44,7 @@ impl std::fmt::Display for Error {
         let text = match self {
             Error::Io(e) => describe(e),
             Error::Zip(e) => zip_message(e),
-            Error::SevenZ(m) => F!("7z 錯誤：{m}", "7z error: {m}"),
+            Error::SevenZ(m) => F!("7z 錯誤：{m}。檔案可能已損壞或沒有下載完整，請重新下載。", "7z error: {m}. The file may be damaged or incomplete; try downloading it again."),
             Error::UnknownFormat(m) => F!("無法辨識的壓縮格式：{m}\n\nZipo 可以開啟 zip、7z、tar、gz、bz2、xz、zst 與 iso。", "Unrecognized archive format: {m}\n\nZipo can open zip, 7z, tar, gz, bz2, xz, zst and iso."),
             Error::Unsupported(m) => m.clone(),
             Error::PasswordRequired => L!("此壓縮檔需要密碼", "This archive requires a password").to_string(),
@@ -97,10 +97,10 @@ fn zip_message(e: &zip::result::ZipError) -> String {
     match e {
         Io(e) => describe(e),
         InvalidArchive(_) => L!("不是有效的 ZIP 檔，或檔案已損壞。檔案可能沒有下載完整，請重新下載。", "Not a valid ZIP file, or the file is damaged. It may not have downloaded completely; try downloading it again.").into(),
-        UnsupportedArchive(m) => F!("不支援的 ZIP 功能（{m}）", "Unsupported ZIP feature ({m})"),
+        UnsupportedArchive(m) => F!("不支援的 ZIP 功能（{m}），可以改用 7-Zip 開啟", "Unsupported ZIP feature ({m}); try opening it with 7-Zip"),
         FileNotFound => L!("壓縮檔中找不到指定的項目", "The specified item was not found in the archive").into(),
         InvalidPassword => L!("密碼錯誤", "Wrong password").into(),
-        other => F!("ZIP 錯誤：{other}", "ZIP error: {other}"),
+        other => F!("ZIP 錯誤：{other}。檔案可能已損壞或沒有下載完整，請重新下載。", "ZIP error: {other}. The file may be damaged or incomplete; try downloading it again."),
     }
 }
 
@@ -327,7 +327,7 @@ pub fn update(
             let x = ExtractOptions { password: opts.password.clone(), ..Default::default() };
             let report = extract(archive, &tmp, &x, progress)?;
             if let Some(i) = report.issues.first() {
-                return Err(Error::Unsupported(F!("無法完整讀出原有項目 {}：{}", "Cannot fully read the existing item {}: {}", i.name, i.reason)));
+                return Err(Error::Unsupported(F!("無法完整讀出原有項目 {}：{}。壓縮檔可能已損壞，沒有做任何修改。", "Cannot fully read the existing item {}: {}. The archive may be damaged; nothing was changed.", i.name, i.reason)));
             }
             let mut all = util::collect_tree(&tmp, drop)?;
             // 原有項目必須全部原樣讀出。Windows 上無法保存的名稱（只差大小寫、含 `:` 等字元、CON 等保留名稱）

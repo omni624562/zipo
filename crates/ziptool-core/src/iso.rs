@@ -43,7 +43,7 @@ fn iso_err(e: &dyn std::fmt::Display, archive: &Path) -> Error {
     if is_udf_only(archive) {
         Error::Unsupported(L!("這個 ISO 只使用 UDF 格式（例如 Windows 安裝光碟），目前還無法讀取。可以在檔案總管對它按右鍵選「掛接」來開啟。", "This ISO uses only the UDF format (for example, Windows installation media) and cannot be read yet. In File Explorer, right-click it and choose \"Mount\" to open it.").into())
     } else {
-        Error::Unsupported(F!("無法讀取 ISO：{e}", "Cannot read the ISO: {e}"))
+        Error::Unsupported(F!("無法讀取 ISO：{e}。檔案可能已損壞；也可以在檔案總管對它按右鍵選「掛接」來開啟。", "Cannot read the ISO: {e}. The file may be damaged; you can also right-click it in File Explorer and choose \"Mount\"."))
     }
 }
 

@@ -127,7 +127,7 @@ fn run_app() -> eframe::Result {
                 .find(|a| a.get_info().backend == eframe::wgpu::Backend::Dx12)
                 .or_else(|| adapters.iter().find(usable))
                 .cloned()
-                .ok_or_else(|| L!("找不到可用的顯示卡", "No usable graphics adapter was found").to_string())
+                .ok_or_else(|| L!("找不到可用的顯示卡，請更新顯示卡驅動程式", "No usable graphics adapter was found; update your graphics driver").to_string())
         }));
     }
     // 檔案總管選取多個檔案時每個各啟動一個 Zipo：合併成一個視窗，其餘直接結束
@@ -1071,7 +1071,7 @@ impl App {
 
     fn start_update_install(&mut self, release: update::Release) {
         let Ok(exe) = std::env::current_exe() else {
-            return self.notice(L!("無法更新", "Cannot update"), L!("找不到目前執行的程式。", "Cannot find the running program."));
+            return self.notice(L!("無法更新", "Cannot update"), L!("找不到目前執行的程式。請到下載頁面手動更新。", "Cannot find the running program. Download the update manually from the download page."));
         };
         self.update_work = Some(UpdateWork::Install(std::thread::spawn(move || update::download_and_install(&release, &exe))));
         self.dialog = Some(Dialog::Updating);
@@ -1089,14 +1089,14 @@ impl App {
         }
         if finished {
             match self.update_work.take() {
-                Some(UpdateWork::Check { manual, handle }) => match handle.join().unwrap_or_else(|_| Err(L!("檢查更新時發生異常", "An error occurred while checking for updates").into())) {
+                Some(UpdateWork::Check { manual, handle }) => match handle.join().unwrap_or_else(|_| Err(L!("檢查更新時發生異常，請稍後再試", "An error occurred while checking for updates; try again later").into())) {
                     Ok(r) if update::is_newer(&r.version, env!("CARGO_PKG_VERSION")) => self.pending_release = Some(r),
                     Ok(_) if manual => self.notice(L!("已是最新版本", "You're up to date"), F!("目前使用的 Zipo {} 已是最新版本。", "Zipo {} is the latest version.", env!("CARGO_PKG_VERSION"))),
                     Err(e) if manual => self.notice(L!("無法檢查更新", "Cannot check for updates"), e),
                     // 自動檢查失敗（例如沒有網路）不打擾使用者
                     _ => {}
                 },
-                Some(UpdateWork::Install(handle)) => match handle.join().unwrap_or_else(|_| Err(L!("更新時發生異常", "An error occurred while updating").into())) {
+                Some(UpdateWork::Install(handle)) => match handle.join().unwrap_or_else(|_| Err(L!("更新時發生異常，請稍後再試，或到下載頁面手動更新", "An error occurred while updating; try again later, or update manually from the download page").into())) {
                     Ok(exe) => {
                         if let Err(e) = std::process::Command::new(&exe).spawn() {
                             self.notice(L!("更新完成", "Update complete"), F!("新版本已安裝，但無法自動重新啟動（{e}）。請手動開啟 Zipo。", "The new version is installed, but Zipo could not restart automatically ({e}). Please open Zipo yourself."));
@@ -1312,7 +1312,7 @@ impl App {
                     else {
                         unreachable!()
                     };
-                    p.state = PreviewState::Ready(h.join().unwrap_or_else(|_| preview::Content::Unavailable(L!("讀取時發生異常", "An error occurred while reading").into())));
+                    p.state = PreviewState::Ready(h.join().unwrap_or_else(|_| preview::Content::Unavailable(L!("讀取時發生異常，請再試一次", "An error occurred while reading; please try again").into())));
                 } else {
                     ctx.request_repaint_after(Duration::from_millis(50));
                 }
@@ -1482,7 +1482,7 @@ impl App {
     fn poll(&mut self, ctx: &egui::Context) {
         if self.loading.as_ref().is_some_and(|l| l.handle.is_finished()) {
             let l = self.loading.take().unwrap();
-            match l.handle.join().unwrap_or_else(|_| Err(Error::Unsupported(L!("讀取時發生異常", "An error occurred while reading").into()))) {
+            match l.handle.join().unwrap_or_else(|_| Err(Error::Unsupported(L!("讀取時發生異常，請再試一次", "An error occurred while reading; please try again").into()))) {
                 Ok(entries) => {
                     let stamp = file_stamp(&l.path).unwrap_or((0, None));
                     let format = Format::detect(&l.path).map(|f| f.name()).unwrap_or("?");

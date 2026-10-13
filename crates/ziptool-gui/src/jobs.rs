@@ -209,7 +209,7 @@ impl Job {
     }
 
     pub fn join(self) -> (Task, Result<Outcome, Error>) {
-        let r = self.handle.join().unwrap_or_else(|_| Err(Error::Unsupported(L!("背景工作異常中止", "The background task stopped unexpectedly").into())));
+        let r = self.handle.join().unwrap_or_else(|_| Err(Error::Unsupported(L!("背景工作異常中止，請再試一次", "The background task stopped unexpectedly; please try again").into())));
         (self.task, r)
     }
 
