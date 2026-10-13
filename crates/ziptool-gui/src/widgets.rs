@@ -202,16 +202,29 @@ pub fn progress_bar(ui: &mut egui::Ui, frac: f32) {
 
 /// 對話框底部的「確定／取消」列；回傳 (確定, 取消)。主要按鈕在左、取消在右（Windows 慣例）。
 pub fn dialog_buttons(ui: &mut egui::Ui, ok_label: &str) -> (bool, bool) {
-    let mut ok = false;
-    let mut cancel = false;
     ui.add_space(12.0);
-    ui.allocate_ui_with_layout(vec2(ui.available_width(), CONTROL_H), Layout::right_to_left(Align::Center), |ui| {
-        cancel = ui.add(secondary_button(ui, L!("取消", "Cancel"))).clicked();
-        ok = ui.add(primary_button(ui, ok_label)).clicked();
-    });
+    let (a, b) = button_pair(ui, ok_label, L!("取消", "Cancel"));
+    let (ok, cancel) = (a.clicked(), b.clicked());
     let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
     let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
     (ok || enter, cancel || esc)
+}
+
+/// 對話框的按鈕列：[主要][次要] 靠右對齊；按 Tab 先到主要按鈕（與 Windows 相同）
+pub fn button_pair(ui: &mut egui::Ui, primary: &str, secondary: &str) -> (egui::Response, egui::Response) {
+    // 依加入的順序決定 Tab 順序，所以由左到右排列，前面留空讓按鈕靠右
+    let font = TextStyle::Button.resolve(ui.style());
+    let pad = ui.spacing().button_padding.x * 2.0;
+    let width = |t: &str| (ui.fonts_mut(|f| f.layout_no_wrap(t.to_string(), font.clone(), egui::Color32::WHITE).size().x) + pad).max(96.0);
+    let total = width(primary) + width(secondary) + ui.spacing().item_spacing.x;
+    let mut out = None;
+    ui.allocate_ui_with_layout(vec2(ui.available_width(), CONTROL_H), Layout::left_to_right(Align::Center), |ui| {
+        ui.add_space((ui.available_width() - total).max(0.0));
+        let a = ui.add(primary_button(ui, primary));
+        let b = ui.add(secondary_button(ui, secondary));
+        out = Some((a, b));
+    });
+    out.unwrap()
 }
 
 /// 對話框標題：20 px 半粗體（Windows 11 ContentDialog 標題樣式）
@@ -249,6 +262,25 @@ mod tests {
         // 連檔名都放不下：至少保留檔名的結尾
         let tiny = elide_middle(path, 8.0, width);
         assert!(tiny.contains('…') && tiny.ends_with(".zip") && width(&tiny) <= 8.0, "{tiny}");
+    }
+
+    /// 對話框按鈕列：主要按鈕在左、次要按鈕在右並靠右對齊；按 Tab 先到主要按鈕（與 Windows 相同）
+    #[test]
+    fn button_pair_focuses_primary_first() {
+        let ctx = egui::Context::default();
+        let mut got = None;
+        for events in [vec![], vec![egui::Event::Key { key: egui::Key::Tab, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }]] {
+            let raw = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(500.0, 100.0))), events, ..Default::default() };
+            let mut out = ctx.run_ui(raw, |ui| {
+                let (a, b) = button_pair(ui, "解壓縮", "取消");
+                got = Some((a.id, a.rect, b.rect, ui.max_rect()));
+            });
+            out.textures_delta.clear();
+        }
+        let (primary, a, b, area) = got.unwrap();
+        assert!(a.max.x <= b.min.x, "主要按鈕在左：{a:?} {b:?}");
+        assert!((area.max.x - b.max.x).abs() <= 2.0, "靠右對齊：{b:?} {area:?}");
+        assert_eq!(ctx.memory(|m| m.focused()), Some(primary), "Tab 先到主要按鈕");
     }
 
     /// 路徑欄位：平常顯示省略後的路徑，點一下就能編輯，輸入的文字寫回欄位

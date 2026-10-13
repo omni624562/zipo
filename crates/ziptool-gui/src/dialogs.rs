@@ -483,7 +483,7 @@ impl PasswordDialog {
             error_text(ui, L!("密碼錯誤，請再試一次", "Wrong password, please try again"));
         }
         ui.add_space(4.0);
-        let (ok, cancel) = dialog_buttons(ui, L!("確定", "OK"));
+        let (ok, cancel) = dialog_buttons(ui, L!("解鎖", "Unlock"));
         if cancel {
             Outcome::Cancel
         } else if ok && !self.input.is_empty() {

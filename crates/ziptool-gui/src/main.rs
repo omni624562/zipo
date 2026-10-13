@@ -2432,11 +2432,8 @@ impl App {
                 ui.add_space(8.0);
                 ui.add(egui::Label::new(RichText::new(message.as_str()).color(p.text)).wrap());
                 ui.add_space(6.0);
-                let (mut go, mut stop) = (false, false);
-                ui.allocate_ui_with_layout(vec2(ui.available_width(), 32.0), Layout::right_to_left(Align::Center), |ui| {
-                    stop = ui.add(secondary_button(ui, L!("取消", "Cancel"))).clicked();
-                    go = ui.add(primary_button(ui, if *danger { L!("刪除", "Delete") } else { L!("加入", "Add") })).clicked();
-                });
+                let (a, b) = button_pair(ui, if *danger { L!("刪除", "Delete") } else { L!("加入", "Add") }, L!("取消", "Cancel"));
+                let (mut go, mut stop) = (a.clicked(), b.clicked());
                 // 刪除不接受 Enter，避免誤按
                 go |= !*danger && ui.input(|i| i.key_pressed(Key::Enter));
                 stop |= ui.input(|i| i.key_pressed(Key::Escape));
@@ -2501,11 +2498,8 @@ This version must be updated manually from the download page.", env!("CARGO_PKG_
                     open_path(Path::new(&release.page));
                 }
                 ui.add_space(6.0);
-                let (mut go, mut later) = (false, false);
-                ui.allocate_ui_with_layout(vec2(ui.available_width(), 32.0), Layout::right_to_left(Align::Center), |ui| {
-                    later = ui.add(secondary_button(ui, L!("稍後", "Later"))).clicked();
-                    go = ui.add(primary_button(ui, if release.asset.is_some() { L!("立即更新", "Update now") } else { L!("開啟下載頁面", "Open download page") })).clicked();
-                });
+                let (a, b) = button_pair(ui, if release.asset.is_some() { L!("立即更新", "Update now") } else { L!("開啟下載頁面", "Open download page") }, L!("稍後", "Later"));
+                let (go, mut later) = (a.clicked(), b.clicked());
                 later |= ui.input(|i| i.key_pressed(Key::Escape));
                 if go {
                     if release.asset.is_some() {
@@ -2569,11 +2563,8 @@ This version must be updated manually from the download page.", env!("CARGO_PKG_
                     ui.add(egui::Label::new(RichText::new(warning).color(p.danger)).wrap());
                 }
                 ui.add_space(6.0);
-                let (mut save, mut skip) = (false, false);
-                ui.allocate_ui_with_layout(vec2(ui.available_width(), 32.0), Layout::right_to_left(Align::Center), |ui| {
-                    skip = ui.add(secondary_button(ui, L!("不要", "Don't save"))).clicked();
-                    save = ui.add(primary_button(ui, L!("存回壓縮檔", "Save to archive"))).clicked();
-                });
+                let (a, b) = button_pair(ui, L!("存回壓縮檔", "Save to archive"), L!("不要", "Don't save"));
+                let (save, mut skip) = (a.clicked(), b.clicked());
                 skip |= ui.input(|i| i.key_pressed(Key::Escape));
                 if save || skip {
                     keep = false;
