@@ -74,13 +74,13 @@ pub fn keep_joined(on: bool) {
 }
 
 /// `archive` 是分割檔時，接回暫存的完整壓縮檔；否則回傳 `None`
-pub(crate) fn join_if_split(archive: &Path) -> Result<Option<Arc<Joined>>> {
+pub(crate) fn join_if_split(archive: &Path, progress: &dyn crate::Progress) -> Result<Option<Arc<Joined>>> {
     if !is_first_volume(archive) {
         return Ok(None);
     }
     let parts = volume_paths(archive)?;
     if !KEEP.load(Ordering::Relaxed) {
-        return join(archive, &parts).map(|j| Some(Arc::new(j)));
+        return join(archive, &parts, progress).map(|j| Some(Arc::new(j)));
     }
     let stamps: Stamps = parts.iter().map(|p| std::fs::metadata(p).map(|m| (m.len(), m.modified().ok())).unwrap_or_default()).collect();
     // 接合期間持有鎖：同時要用同一組分割檔的其他工作等這次完成後直接沿用
@@ -93,12 +93,21 @@ pub(crate) fn join_if_split(archive: &Path) -> Result<Option<Arc<Joined>>> {
     }
     // 先釋放舊的，暫存空間不會同時被兩份佔用
     *cache = None;
-    let j = Arc::new(join(archive, &parts)?);
+    let j = Arc::new(join(archive, &parts, progress)?);
     *cache = Some((archive.to_path_buf(), stamps, j.clone()));
     Ok(Some(j))
 }
 
-fn join(archive: &Path, parts: &[PathBuf]) -> Result<Joined> {
+/// `dir` 所在的磁碟至少要有 `need` 位元組的可用空間（無法得知時不檢查）
+fn ensure_space(dir: &Path, need: u64) -> Result<()> {
+    match fs4::available_space(dir) {
+        Ok(available) if need > available => Err(Error::NotEnoughSpace { need, available }),
+        _ => Ok(()),
+    }
+}
+
+/// 接回暫存的完整壓縮檔；可以取消，失敗或取消時刪除暫存檔
+fn join(archive: &Path, parts: &[PathBuf], progress: &dyn crate::Progress) -> Result<Joined> {
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     // Windows 的暫存資料夾每位使用者各一個，放在 Zipo 底下以便清理；Unix 的 /tmp 是共用的，
     // 其他使用者可以先建立 /tmp/Zipo 再替換其中的資料夾，所以直接放在 /tmp 並只允許自己存取
@@ -112,9 +121,22 @@ fn join(archive: &Path, parts: &[PathBuf]) -> Result<Joined> {
     // 不用 create_dir_all：資料夾已存在（被搶先建立）時失敗
     builder.create(&dir)?;
     let joined = Joined { path: dir.join(archive.with_extension("").file_name().unwrap_or_default()), dir };
+    let need = parts.iter().filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).fold(0u64, u64::saturating_add);
+    ensure_space(&joined.dir, need)?;
     let mut out = io::BufWriter::new(File::create(&joined.path)?);
+    let mut buf = vec![0u8; 1 << 20];
     for p in parts {
-        io::copy(&mut File::open(p)?, &mut out)?;
+        let mut src = File::open(p)?;
+        loop {
+            if progress.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+            let n = src.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            out.write_all(&buf[..n])?;
+        }
     }
     out.flush()?;
     drop(out);
@@ -191,6 +213,7 @@ pub fn parse_size(s: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::NoProgress;
 
     #[test]
     fn sizes() {
@@ -201,6 +224,32 @@ mod tests {
         assert_eq!(parse_size("0"), None);
         assert_eq!(parse_size("10x"), None);
         assert_eq!(parse_size(""), None);
+    }
+
+    /// 接合期間可以取消，取消後不留下暫存檔；暫存磁碟空間不足時先回報，不開始接合
+    #[test]
+    fn join_can_be_cancelled_and_checks_space() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        struct Cancel;
+        impl crate::Progress for Cancel {
+            fn is_cancelled(&self) -> bool {
+                true
+            }
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("c.zip");
+        std::fs::write(&f, vec![1u8; 30_000]).unwrap();
+        let parts = split(&f, 10_000).unwrap();
+        let mine = || -> Vec<String> {
+            let parent = if cfg!(windows) { std::env::temp_dir().join("Zipo") } else { std::env::temp_dir() };
+            let prefix = format!("zipo-join-{}-", std::process::id());
+            std::fs::read_dir(parent).map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with(&prefix)).collect()).unwrap_or_default()
+        };
+        let before = mine();
+        assert!(matches!(join_if_split(&parts[0], &Cancel), Err(Error::Cancelled)));
+        assert_eq!(mine(), before, "取消後不應留下暫存檔");
+        assert!(matches!(ensure_space(tmp.path(), u64::MAX), Err(Error::NotEnoughSpace { .. })));
+        assert!(ensure_space(tmp.path(), 1).is_ok());
     }
 
     /// 兩個測試都會改變全域的「保留接合結果」設定，依序執行
@@ -215,15 +264,15 @@ mod tests {
         std::fs::write(&f, vec![7u8; 30_000]).unwrap();
         let parts = split(&f, 10_000).unwrap();
         keep_joined(true);
-        let a = join_if_split(&parts[0]).unwrap().unwrap();
-        let b = join_if_split(&parts[0]).unwrap().unwrap();
+        let a = join_if_split(&parts[0], &NoProgress).unwrap().unwrap();
+        let b = join_if_split(&parts[0], &NoProgress).unwrap().unwrap();
         assert!(std::sync::Arc::ptr_eq(&a, &b), "沒有變動時應沿用");
         let first_dir = a.dir.clone();
         drop((a, b));
         assert!(first_dir.exists(), "保留中不可刪除");
         // 分割檔變動（內容與時間）：重新接合，舊的刪除
         std::fs::write(&parts[2], vec![8u8; 9_000]).unwrap();
-        let c = join_if_split(&parts[0]).unwrap().unwrap();
+        let c = join_if_split(&parts[0], &NoProgress).unwrap().unwrap();
         assert_ne!(c.dir, first_dir);
         assert_eq!(std::fs::metadata(&c.path).unwrap().len(), 29_000);
         assert!(!first_dir.exists(), "舊的接合結果應刪除");
@@ -245,7 +294,7 @@ mod tests {
         assert_eq!(names, ["a.zip.001", "a.zip.002", "a.zip.003"]);
         assert!(!f.exists(), "原檔應刪除");
         assert_eq!(std::fs::metadata(&parts[2]).unwrap().len(), 50_000);
-        let joined = join_if_split(&parts[0]).unwrap().unwrap();
+        let joined = join_if_split(&parts[0], &NoProgress).unwrap().unwrap();
         assert_eq!(joined.path.file_name().unwrap(), "a.zip");
         assert_eq!(std::fs::read(&joined.path).unwrap(), data);
         let dir = joined.dir.clone();
@@ -261,10 +310,10 @@ mod tests {
 
         // 中間缺一個：說明缺少哪一個
         std::fs::remove_file(&parts[1]).unwrap();
-        let e = join_if_split(&parts[0]).err().unwrap().to_string();
+        let e = join_if_split(&parts[0], &NoProgress).err().unwrap().to_string();
         assert!(e.contains("a.zip.002"), "{e}");
 
         // 不是分割檔：不處理
-        assert!(join_if_split(&tmp.path().join("x.zip")).unwrap().is_none());
+        assert!(join_if_split(&tmp.path().join("x.zip"), &NoProgress).unwrap().is_none());
     }
 }

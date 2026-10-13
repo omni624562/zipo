@@ -376,7 +376,7 @@ pub fn update(
 /// 壓縮檔本身的錯誤（損壞、密碼錯誤）則中止並回傳錯誤。
 pub fn extract(archive: &Path, dest: &Path, opts: &ExtractOptions, progress: &dyn Progress) -> Result<ExtractReport> {
     // 分割檔（名稱.001）先接回暫存的完整壓縮檔
-    let joined = volume::join_if_split(archive)?;
+    let joined = volume::join_if_split(archive, progress)?;
     let archive = joined.as_ref().map_or(archive, |j| j.path.as_path());
     let format = Format::detect(archive)?;
     std::fs::create_dir_all(dest)?;
@@ -425,7 +425,7 @@ fn check_size(need: u64, packed: u64, available: Option<u64>, allow_high_ratio: 
 
 /// 列出 `archive` 的內容。
 pub fn list(archive: &Path, password: Option<&str>) -> Result<Vec<Entry>> {
-    let joined = volume::join_if_split(archive)?;
+    let joined = volume::join_if_split(archive, &NoProgress)?;
     let archive = joined.as_ref().map_or(archive, |j| j.path.as_path());
     let mut entries = match Format::detect(archive)? {
         Format::Zip => zip_fmt::list(archive)?,
@@ -443,7 +443,7 @@ pub fn list(archive: &Path, password: Option<&str>) -> Result<Vec<Entry>> {
 
 /// 測試壓縮檔完整性：完整解碼每個項目並驗證 CRC，但不寫出任何檔案。
 pub fn test(archive: &Path, password: Option<&str>, progress: &dyn Progress) -> Result<TestReport> {
-    let joined = volume::join_if_split(archive)?;
+    let joined = volume::join_if_split(archive, progress)?;
     let archive = joined.as_ref().map_or(archive, |j| j.path.as_path());
     let res = match Format::detect(archive)? {
         Format::Zip => zip_fmt::test(archive, password, progress),
