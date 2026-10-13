@@ -64,7 +64,7 @@ impl AddDialog {
             dir.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| L!("壓縮檔", "Archive").into())
         };
         // 單檔格式只能壓縮一個檔案；上次用單檔格式、這次選多個時改回 7z
-        let format = if format.is_single() && (inputs.len() != 1 || first.is_dir()) { Format::SevenZ } else { format };
+        let format = if format.is_single() && (inputs.len() != 1 || first.is_dir()) { Format::Zip } else { format };
         Self {
             archive: dir.join(format!("{stem}.{}", format.extension())).display().to_string(),
             inputs,

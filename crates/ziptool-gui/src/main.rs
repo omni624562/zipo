@@ -611,7 +611,7 @@ impl App {
             addr_editing: false,
             typeahead: String::new(),
             typeahead_at: std::time::Instant::now(),
-            add_format: Format::SevenZ,
+            add_format: Format::Zip,
             add_level: 3,
             show_system: false,
             auto_update: true,
@@ -3393,7 +3393,7 @@ mod phase3_tests {
             let mut app = App::new(Some(root.join("sub")));
             app.sort_key = SortKey::Size;
             app.sort_asc = false;
-            app.add_format = Format::Zip;
+            app.add_format = Format::SevenZ;
             app.add_level = 5;
             app.auto_update = false;
             app.last_update_check = 1234;
@@ -3402,7 +3402,12 @@ mod phase3_tests {
         let app = App::with_storage(None, Some(&store));
         assert_eq!(app.loc, Location::Dir(root.join("sub")));
         assert_eq!((app.sort_key, app.sort_asc), (SortKey::Size, false));
-        assert_eq!((app.add_format, app.add_level), (Format::Zip, 5));
+        assert_eq!((app.add_format, app.add_level), (Format::SevenZ, 5));
+        // 第一次使用：預設 zip（Windows、macOS 不必安裝軟體就能開啟，傳給別人最方便）
+        assert_eq!(App::with_storage(None, Some(&MemStorage::default())).add_format, Format::Zip);
+        // 選了只能放一個檔案的格式（gz）卻要壓縮多個項目：改用 zip
+        let d = AddDialog::new(vec![root.join("sub"), root.join("f00.txt")], Format::Gz, 5);
+        assert_eq!(d.choice().0, Format::Zip);
         assert_eq!((app.auto_update, app.last_update_check), (false, 1234));
 
         // 記住的資料夾已被刪除：改回家目錄，不出錯
