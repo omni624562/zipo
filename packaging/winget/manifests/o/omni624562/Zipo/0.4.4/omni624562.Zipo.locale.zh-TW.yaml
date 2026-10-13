@@ -1,0 +1,21 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.locale.1.10.0.schema.json
+
+PackageIdentifier: omni624562.Zipo
+PackageVersion: 0.4.4
+PackageLocale: zh-TW
+Publisher: omni624562
+PackageName: Zipo
+License: MIT
+ShortDescription: 以 7-Zip 為藍本的壓縮工具，提供檔案管理員式的圖形介面與 7z 相容的命令列。
+Description: |-
+  Zipo 可以壓縮與解壓縮 ZIP、7z、TAR（gz、bz2、xz、zst）與單檔壓縮格式，並能讀取 ISO 映像檔。
+  支援 AES-256 加密、分割壓縮、瀏覽與預覽壓縮檔內容，並整合檔案總管右鍵選單。
+  命令列（zipo）的指令語法與 7-Zip 的 7z.exe 相同。
+Tags:
+  - 7z
+  - zip
+  - 壓縮
+  - 解壓縮
+ReleaseNotesUrl: https://github.com/omni624562/zipo/releases/tag/v0.4.4
+ManifestType: locale
+ManifestVersion: 1.10.0

@@ -1,0 +1,28 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.10.0.schema.json
+
+PackageIdentifier: omni624562.Zipo
+PackageVersion: 0.4.4
+PackageLocale: en-US
+Publisher: omni624562
+PublisherUrl: https://github.com/omni624562
+PublisherSupportUrl: https://github.com/omni624562/zipo/issues
+PackageName: Zipo
+PackageUrl: https://github.com/omni624562/zipo
+License: MIT
+LicenseUrl: https://github.com/omni624562/zipo/blob/main/LICENSE
+ShortDescription: An archiver modeled on 7-Zip, with a file manager and a 7z-compatible command line.
+Description: |-
+  Zipo compresses and extracts ZIP, 7z, TAR (gz, bz2, xz, zst) and single-file formats, and reads ISO images.
+  It supports AES-256 encryption, split volumes, archive browsing with preview, and integrates with File Explorer.
+  The command line (zipo) uses the same syntax as 7-Zip's 7z.exe.
+Moniker: zipo
+Tags:
+  - 7z
+  - archive
+  - compression
+  - extract
+  - unzip
+  - zip
+ReleaseNotesUrl: https://github.com/omni624562/zipo/releases/tag/v0.4.4
+ManifestType: defaultLocale
+ManifestVersion: 1.10.0
