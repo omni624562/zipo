@@ -130,6 +130,44 @@ pub fn elide_middle(text: &str, max: f32, width: impl Fn(&str) -> f32) -> String
     make(lo)
 }
 
+/// 選單項目的高度與各欄位置（Windows 11 選單樣式）
+const MENU_ITEM_H: f32 = 32.0;
+const MENU_TEXT_X: f32 = 40.0;
+
+/// 選單的寬度：放得下最長的文字與右側內容（快捷鍵、子選單箭頭）
+pub fn menu_width(ui: &egui::Ui, items: &[(&str, &str)]) -> f32 {
+    let w = |t: &str, size: f32| ui.fonts_mut(|f| f.layout_no_wrap(t.to_string(), FontId::proportional(size), egui::Color32::WHITE).size().x);
+    items.iter().map(|(label, right)| MENU_TEXT_X + w(label, 14.0) + 32.0 + if right.is_empty() { 0.0 } else { w(right, 12.5) + 12.0 }).fold(200.0, f32::max)
+}
+
+/// 選單項目：左側固定一欄放圖示（或目前選擇的 ✓），接著是文字，右側為灰色的快捷鍵或子選單箭頭
+pub fn menu_item(ui: &mut egui::Ui, glyph: &str, label: &str, right: &str) -> egui::Response {
+    let p = pal(ui);
+    let enabled = ui.is_enabled();
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), MENU_ITEM_H), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        if enabled && (resp.hovered() || resp.has_focus()) {
+            painter.rect_filled(rect, 4.0, p.hover);
+        }
+        let fg = if enabled { p.text } else { p.muted };
+        let y = rect.center().y;
+        painter.text(egui::pos2(rect.left() + 12.0, y), egui::Align2::LEFT_CENTER, glyph, FontId::proportional(16.0), fg);
+        painter.text(egui::pos2(rect.left() + MENU_TEXT_X, y), egui::Align2::LEFT_CENTER, label, FontId::proportional(14.0), fg);
+        if !right.is_empty() {
+            painter.text(egui::pos2(rect.right() - 12.0, y), egui::Align2::RIGHT_CENTER, right, FontId::proportional(12.5), if enabled { p.text2 } else { p.muted });
+        }
+    }
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
+    resp
+}
+
+/// 有子選單的選單項目：滑過或點一下就在右側展開
+pub fn submenu_item(ui: &mut egui::Ui, glyph: &str, label: &str, content: impl FnOnce(&mut egui::Ui)) {
+    let resp = menu_item(ui, glyph, label, icon::CARET_RIGHT);
+    egui::containers::menu::SubMenu::new().show(ui, &resp, content);
+}
+
 /// 單行文字：放不下 `max` 寬度時從中間省略（保留結尾的檔名），滑過時顯示完整內容
 pub fn elided_label(ui: &mut egui::Ui, text: &str, size: f32, color: egui::Color32, max: f32) -> egui::Response {
     let font = FontId::proportional(size);

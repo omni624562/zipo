@@ -585,6 +585,9 @@ struct App {
 
     #[cfg(debug_assertions)]
     devshot: Option<(devshot::DevShot, usize, Option<String>)>,
+    /// 開發版截圖：保持「⋯」選單打開
+    #[cfg(debug_assertions)]
+    shot_menu: bool,
 }
 
 impl App {
@@ -640,6 +643,8 @@ impl App {
             perf: perf::Perf::from_env(),
             #[cfg(debug_assertions)]
             devshot: None,
+            #[cfg(debug_assertions)]
+            shot_menu: false,
         };
         let get = |k: &str| storage.and_then(|s| s.get_string(k));
         app.auto_update = get("auto_update").as_deref() != Some("0");
@@ -1661,27 +1666,67 @@ impl App {
     }
 
     /// 「⋯」選單：開啟壓縮檔、選取、檔案總管整合、關於、結束
+    /// 「⋯」選單：常用的在前，較少用的「檔案總管整合」與「語言」收進子選單
     fn more_menu(&mut self, ui: &mut egui::Ui) {
-        ui.set_min_width(220.0);
-        if ui.button(F!("{}  開啟壓縮檔…", "{}  Open archive…", icon::FOLDER_OPEN)).clicked()
+        let (open, select_all, select_none, invert) = (L!("開啟壓縮檔…", "Open archive…"), L!("全選", "Select all"), L!("取消選取", "Select none"), L!("反向選取", "Invert selection"));
+        let (explorer, language) = (L!("檔案總管整合", "File Explorer integration"), "語言 / Language");
+        let (check, auto) = (L!("檢查更新…", "Check for updates…"), L!("啟動時自動檢查更新", "Check for updates at startup"));
+        let (about, exit) = (L!("關於 Zipo", "About Zipo"), L!("結束", "Exit"));
+        let w = menu_width(ui, &[(open, ""), (select_all, "Ctrl+A"), (select_none, ""), (invert, ""), (explorer, "›"), (language, "›"), (check, ""), (auto, ""), (about, ""), (exit, "")]);
+        ui.set_width(w);
+        if menu_item(ui, icon::FOLDER_OPEN, open, "").clicked()
             && let Some(p) = rfd::FileDialog::new().pick_file()
         {
             self.open_path_arg(p);
         }
         ui.separator();
-        if ui.button(F!("{}  全選\tCtrl+A", "{}  Select all\tCtrl+A", icon::CHECK_SQUARE)).clicked() {
+        if menu_item(ui, icon::CHECK_SQUARE, select_all, "Ctrl+A").clicked() {
             self.sel = (0..self.rows.len()).collect();
         }
-        if ui.button(F!("{}  取消選取", "{}  Select none", icon::SQUARE)).clicked() {
+        if menu_item(ui, icon::SQUARE, select_none, "").clicked() {
             self.sel.clear();
         }
-        if ui.button(F!("{}  反向選取", "{}  Invert selection", icon::SWAP)).clicked() {
+        if menu_item(ui, icon::SWAP, invert, "").clicked() {
             self.sel = (0..self.rows.len()).filter(|i| !self.sel.contains(i)).collect();
         }
         ui.separator();
+        submenu_item(ui, icon::CURSOR_CLICK, explorer, |ui| self.explorer_menu(ui));
+        submenu_item(ui, icon::TRANSLATE, language, |ui| {
+            let items = [(Language::Auto, L!("依系統設定", "System default")), (Language::Chinese, "繁體中文"), (Language::English, "English")];
+            ui.set_width(menu_width(ui, &items.map(|(_, l)| (l, ""))));
+            // 兩種語言並列，切換錯了也找得回來
+            for (lang, label) in items {
+                if menu_item(ui, if self.language == lang { icon::CHECK } else { "" }, label, "").clicked() {
+                    self.language = lang;
+                    ziptool_core::i18n::set_english(lang.english());
+                }
+            }
+        });
+        ui.separator();
+        let checking = matches!(self.update_work, Some(UpdateWork::Check { .. }));
+        if ui.add_enabled_ui(!checking, |ui| menu_item(ui, icon::ARROWS_CLOCKWISE, check, "")).inner.clicked() {
+            self.start_update_check(true);
+        }
+        if menu_item(ui, if self.auto_update { icon::CHECK } else { "" }, auto, "").clicked() {
+            self.auto_update = !self.auto_update;
+        }
+        ui.separator();
+        if menu_item(ui, icon::INFO, about, "").clicked() {
+            self.dialog = Some(Dialog::About);
+        }
+        if menu_item(ui, icon::SIGN_OUT, exit, "").clicked() {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    /// 「⋯ › 檔案總管整合」：右鍵選單與預設程式
+    fn explorer_menu(&mut self, ui: &mut egui::Ui) {
         let installed = shell::is_installed(shell::ROOT);
+        let registered = shell::is_default_registered(shell::SOFTWARE);
         let label = if installed { L!("移除檔案總管右鍵選單", "Remove from File Explorer context menu") } else { L!("加入檔案總管右鍵選單", "Add to File Explorer context menu") };
-        let r = ui.button(format!("{}  {label}", icon::CURSOR_CLICK)).on_hover_text(
+        let (set_default, unregister) = (L!("設為壓縮檔預設程式…", "Set as default app for archives…"), L!("移除預設程式註冊", "Remove default app registration"));
+        ui.set_width(menu_width(ui, &[(label, ""), (set_default, ""), (unregister, "")]));
+        let r = menu_item(ui, icon::CURSOR_CLICK, label, "").on_hover_text(
             L!("在檔案總管的右鍵選單加入「加入壓縮檔」「解壓縮到這裡」等項目（Windows 11 位於「顯示其他選項」）。\n只修改目前使用者的設定，隨時可以移除。", "Adds items such as \"Add to archive\" and \"Extract here\" to the File Explorer context menu (on Windows 11, under \"Show more options\").\nOnly the current user's settings are changed, and it can be removed at any time."),
         );
         if r.clicked() {
@@ -1697,7 +1742,7 @@ impl App {
             };
             self.notice(title, msg);
         }
-        let r = ui.button(F!("{}  設為壓縮檔預設程式…", "{}  Set as default app for archives…", icon::ARCHIVE)).on_hover_text(
+        let r = menu_item(ui, icon::ARCHIVE, set_default, "").on_hover_text(
             L!("讓 Zipo 成為 .zip、.7z 等壓縮檔的預設開啟程式。\nWindows 不允許程式自行變更預設程式，接下來會開啟「設定」，請在那裡選取 Zipo。", "Make Zipo the default app for .zip, .7z and other archives.\nWindows doesn't let apps change defaults themselves, so Settings will open next; choose Zipo there."),
         );
         if r.clicked() {
@@ -1712,35 +1757,14 @@ impl App {
                 Err(e) => self.notice(L!("無法註冊預設程式", "Cannot register as a default app"), ziptool_core::describe(&e)),
             }
         }
-        if shell::is_default_registered(shell::SOFTWARE) {
-            let r = ui.button(F!("{}  移除預設程式註冊", "{}  Remove default app registration", icon::X_CIRCLE)).on_hover_text(L!("從 Windows 的預設程式清單移除 Zipo。", "Remove Zipo from the Windows default apps list."));
+        if registered {
+            let r = menu_item(ui, icon::X_CIRCLE, unregister, "").on_hover_text(L!("從 Windows 的預設程式清單移除 Zipo。", "Remove Zipo from the Windows default apps list."));
             if r.clicked() {
                 match shell::unregister_default(shell::SOFTWARE) {
                     Ok(()) => self.notice(L!("已移除預設程式註冊", "Default app registration removed"), L!("壓縮檔會改由 Windows 原本的程式開啟。", "Archives will open with the original Windows app again.")),
                     Err(e) => self.notice(L!("無法移除預設程式註冊", "Cannot remove the default app registration"), ziptool_core::describe(&e)),
                 }
             }
-        }
-        ui.separator();
-        let checking = matches!(self.update_work, Some(UpdateWork::Check { .. }));
-        if ui.add_enabled(!checking, egui::Button::new(F!("{}  檢查更新…", "{}  Check for updates…", icon::ARROWS_CLOCKWISE))).clicked() {
-            self.start_update_check(true);
-        }
-        ui.checkbox(&mut self.auto_update, L!("啟動時自動檢查更新", "Check for updates at startup"));
-        ui.separator();
-        // 兩種語言並列，切換錯了也找得回來
-        ui.label(RichText::new("語言 / Language").size(12.0).color(pal(ui).text2));
-        for (lang, label) in [(Language::Auto, L!("依系統設定", "System default")), (Language::Chinese, "繁體中文"), (Language::English, "English")] {
-            if ui.radio(self.language == lang, label).clicked() {
-                self.language = lang;
-                ziptool_core::i18n::set_english(lang.english());
-            }
-        }
-        if ui.button(F!("{}  關於 Zipo", "{}  About Zipo", icon::INFO)).clicked() {
-            self.dialog = Some(Dialog::About);
-        }
-        if ui.button(F!("{}  結束", "{}  Exit", icon::SIGN_OUT)).clicked() {
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         }
     }
 
@@ -1791,7 +1815,10 @@ impl App {
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let more = command_button(ui, icon::DOTS_THREE, None).on_hover_text(L!("更多", "More"));
-                egui::Popup::menu(&more).show(|ui| self.more_menu(ui));
+                let popup = egui::Popup::menu(&more);
+                #[cfg(debug_assertions)]
+                let popup = if self.shot_menu { popup.open(true) } else { popup };
+                popup.show(|ui| self.more_menu(ui));
                 let view = command_button(ui, icon::SLIDERS_HORIZONTAL, Some(L!("檢視", "View"))).on_hover_text(L!("排序、顯示方式與外觀", "Sorting, display and appearance"));
                 egui::Popup::menu(&view).show(|ui| self.view_menu(ui));
             });
@@ -3079,6 +3106,7 @@ impl App {
                     "info" => self.cmd_info(),
                     "delete" => self.cmd_delete(),
                     "about" => self.dialog = Some(Dialog::About),
+                    "menu" => self.shot_menu = true,
                     "update" => {
                         let asset = update::Asset { name: "zipo.zip".into(), url: String::new(), sha256: "0".repeat(64), size: 9_200_000 };
                         let page = "https://github.com/omni624562/zipo/releases".into();
@@ -4372,6 +4400,53 @@ mod drag_out_tests {
         app.navigate(Location::Dir(root.clone()));
         app.paste_files(vec![f]);
         assert!(app.dialog.is_none());
+    }
+
+    /// 「⋯」選單：滑過「語言 / Language」會展開子選單，點選其中的項目會套用（以輔助使用資訊找出項目的位置）
+    #[test]
+    fn more_menu_submenu_opens_and_applies() {
+        let t = tempfile::tempdir().unwrap();
+        let mut app = App::new(Some(real_path(t.path())));
+        assert_eq!(app.language, Language::Auto);
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(1000.0, 700.0));
+        // 執行一個畫面，回傳畫面上每個項目的（名稱, 位置）
+        let frame = |app: &mut App, events: Vec<egui::Event>| -> Vec<(String, egui::Rect)> {
+            let mut out = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), events, ..Default::default() }, |ui| app.command_bar(ui));
+            out.textures_delta.clear();
+            let update = out.platform_output.accesskit_update.unwrap();
+            update
+                .nodes
+                .iter()
+                .filter_map(|(_, n)| {
+                    let b = n.bounds()?;
+                    Some((n.label().unwrap_or_default().to_string(), egui::Rect::from_min_max(egui::pos2(b.x0 as f32, b.y0 as f32), egui::pos2(b.x1 as f32, b.y1 as f32))))
+                })
+                .collect()
+        };
+        let click = |pos: egui::Pos2| {
+            let b = |pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+            vec![egui::Event::PointerMoved(pos), b(true), b(false)]
+        };
+        let find = |nodes: &[(String, egui::Rect)], label: &str| nodes.iter().find(|(l, _)| l == label).map(|(_, r)| r.center());
+        frame(&mut app, vec![]);
+        // 「⋯」在工具列最右邊
+        frame(&mut app, click(egui::pos2(screen.right() - 12.0, CONTROL_H / 2.0)));
+        let nodes = frame(&mut app, vec![]);
+        let lang = find(&nodes, "語言 / Language").expect("選單應已打開");
+        frame(&mut app, vec![egui::Event::PointerMoved(lang)]);
+        let mut nodes = frame(&mut app, vec![egui::Event::PointerMoved(lang)]);
+        for _ in 0..5 {
+            if find(&nodes, "繁體中文").is_some() {
+                break;
+            }
+            nodes = frame(&mut app, vec![egui::Event::PointerMoved(lang)]);
+        }
+        let zh = find(&nodes, "繁體中文").expect("子選單應已展開");
+        frame(&mut app, vec![egui::Event::PointerMoved(zh)]);
+        frame(&mut app, click(zh));
+        assert_eq!(app.language, Language::Chinese);
     }
 
     #[test]
