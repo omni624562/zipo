@@ -141,6 +141,8 @@ fn run_app() -> eframe::Result {
             };
             let mut app = App::with_storage(open, cc.storage);
             ziptool_core::i18n::set_english(app.language.english());
+            // 瀏覽、預覽、解壓縮同一組分割檔時只接合一次（結束時刪除）
+            ziptool_core::keep_joined_volumes(true);
             // 舊版註冊的右鍵選單或預設程式缺少新的副檔名時補上
             if let Ok(exe) = std::env::current_exe() {
                 shell::refresh(shell::ROOT, shell::SOFTWARE, &exe);
@@ -2812,6 +2814,7 @@ impl eframe::App for App {
 
     /// 程式結束時清除本程式建立的暫存資料夾（開啟壓縮檔內的檔案、拖曳到程式外）
     fn on_exit(&mut self) {
+        ziptool_core::keep_joined_volumes(false);
         cleanup_temp(true);
     }
 

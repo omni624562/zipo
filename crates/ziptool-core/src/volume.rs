@@ -5,6 +5,9 @@ use crate::{F, L};
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 use crate::{Error, Result};
 
@@ -54,12 +57,48 @@ impl Drop for Joined {
     }
 }
 
+/// 是否保留最近一次的接合結果（圖形介面：瀏覽、預覽、解壓縮同一組分割檔時不必每次重新接合）
+static KEEP: AtomicBool = AtomicBool::new(false);
+
+/// 保留的接合結果：第一個分割檔、各分割檔的大小與修改時間
+type Stamps = Vec<(u64, Option<SystemTime>)>;
+static CACHE: Mutex<Option<(PathBuf, Stamps, Arc<Joined>)>> = Mutex::new(None);
+
+/// 開啟或關閉保留接合結果；關閉時釋放保留的暫存檔（沒有其他地方使用時立即刪除）
+pub fn keep_joined(on: bool) {
+    KEEP.store(on, Ordering::Relaxed);
+    if !on {
+        let old = CACHE.lock().unwrap_or_else(|e| e.into_inner()).take();
+        drop(old);
+    }
+}
+
 /// `archive` 是分割檔時，接回暫存的完整壓縮檔；否則回傳 `None`
-pub(crate) fn join_if_split(archive: &Path) -> Result<Option<Joined>> {
+pub(crate) fn join_if_split(archive: &Path) -> Result<Option<Arc<Joined>>> {
     if !is_first_volume(archive) {
         return Ok(None);
     }
     let parts = volume_paths(archive)?;
+    if !KEEP.load(Ordering::Relaxed) {
+        return join(archive, &parts).map(|j| Some(Arc::new(j)));
+    }
+    let stamps: Stamps = parts.iter().map(|p| std::fs::metadata(p).map(|m| (m.len(), m.modified().ok())).unwrap_or_default()).collect();
+    // 接合期間持有鎖：同時要用同一組分割檔的其他工作等這次完成後直接沿用
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((first, s, j)) = cache.as_ref()
+        && first == archive
+        && *s == stamps
+    {
+        return Ok(Some(j.clone()));
+    }
+    // 先釋放舊的，暫存空間不會同時被兩份佔用
+    *cache = None;
+    let j = Arc::new(join(archive, &parts)?);
+    *cache = Some((archive.to_path_buf(), stamps, j.clone()));
+    Ok(Some(j))
+}
+
+fn join(archive: &Path, parts: &[PathBuf]) -> Result<Joined> {
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     // Windows 的暫存資料夾每位使用者各一個，放在 Zipo 底下以便清理；Unix 的 /tmp 是共用的，
     // 其他使用者可以先建立 /tmp/Zipo 再替換其中的資料夾，所以直接放在 /tmp 並只允許自己存取
@@ -74,7 +113,7 @@ pub(crate) fn join_if_split(archive: &Path) -> Result<Option<Joined>> {
     builder.create(&dir)?;
     let joined = Joined { path: dir.join(archive.with_extension("").file_name().unwrap_or_default()), dir };
     let mut out = io::BufWriter::new(File::create(&joined.path)?);
-    for p in &parts {
+    for p in parts {
         io::copy(&mut File::open(p)?, &mut out)?;
     }
     out.flush()?;
@@ -83,7 +122,7 @@ pub(crate) fn join_if_split(archive: &Path) -> Result<Option<Joined>> {
     if let Some(z) = crate::util::zone_identifier(archive) {
         crate::util::set_zone_identifier(&joined.path, &z)?;
     }
-    Ok(Some(joined))
+    Ok(joined)
 }
 
 /// 把 `path` 切成每個 `size` 位元組的分割檔，完成後刪除原檔；回傳所有分割檔
@@ -164,8 +203,39 @@ mod tests {
         assert_eq!(parse_size(""), None);
     }
 
+    /// 兩個測試都會改變全域的「保留接合結果」設定，依序執行
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// 圖形介面保留接合結果：分割檔沒有變動時沿用，不重新接合；有變動或關閉保留時重新接合並刪除舊的
+    #[test]
+    fn joined_archive_is_reused_until_volumes_change() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("r.zip");
+        std::fs::write(&f, vec![7u8; 30_000]).unwrap();
+        let parts = split(&f, 10_000).unwrap();
+        keep_joined(true);
+        let a = join_if_split(&parts[0]).unwrap().unwrap();
+        let b = join_if_split(&parts[0]).unwrap().unwrap();
+        assert!(std::sync::Arc::ptr_eq(&a, &b), "沒有變動時應沿用");
+        let first_dir = a.dir.clone();
+        drop((a, b));
+        assert!(first_dir.exists(), "保留中不可刪除");
+        // 分割檔變動（內容與時間）：重新接合，舊的刪除
+        std::fs::write(&parts[2], vec![8u8; 9_000]).unwrap();
+        let c = join_if_split(&parts[0]).unwrap().unwrap();
+        assert_ne!(c.dir, first_dir);
+        assert_eq!(std::fs::metadata(&c.path).unwrap().len(), 29_000);
+        assert!(!first_dir.exists(), "舊的接合結果應刪除");
+        let dir = c.dir.clone();
+        drop(c);
+        keep_joined(false);
+        assert!(!dir.exists(), "關閉保留後應刪除");
+    }
+
     #[test]
     fn split_and_join() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let f = tmp.path().join("a.zip");
         let data: Vec<u8> = (0..250_000u32).map(|i| (i * 31 % 251) as u8).collect();
