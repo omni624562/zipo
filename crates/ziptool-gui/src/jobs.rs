@@ -341,7 +341,12 @@ fn run(task: Task, s: &Shared) -> Result<Outcome, Error> {
                 message += &if !issues.is_empty() || skipped > 0 || opts.selection.is_some() {
                     L!("\n\n有項目未解出，壓縮檔保留不動。", "\n\nSome items were not extracted; the archive was kept.").to_string()
                 } else {
-                    match send_to_recycle_bin(&archives) {
+                    // 分割壓縮檔：整組分割檔一起移除
+                    let all: Vec<PathBuf> = archives
+                        .iter()
+                        .flat_map(|a| if ziptool_core::is_first_volume(a) { ziptool_core::volume_paths(a).unwrap_or_else(|_| vec![a.clone()]) } else { vec![a.clone()] })
+                        .collect();
+                    match send_to_recycle_bin(&all) {
                         Ok(()) => L!("\n\n壓縮檔已移到資源回收筒。", "\n\nThe archive was moved to the Recycle Bin.").to_string(),
                         Err(e) => F!("\n\n壓縮檔無法移到資源回收筒：{e}", "\n\nThe archive could not be moved to the Recycle Bin: {e}"),
                     }
@@ -610,6 +615,17 @@ mod then_tests {
         assert!(o.message.contains("壓縮檔保留不動"), "{}", o.message);
         assert!(ar.exists());
         assert_eq!(std::fs::read_to_string(t.path().join("x4/a.txt")).unwrap(), "舊版");
+
+        // 分割壓縮檔：整組分割檔都移除，不只是 .001
+        let whole = t.path().join("vol.zip");
+        let opts = ziptool_core::CompressOptions { level: Some(0), volume_size: Some(64), ..Default::default() };
+        ziptool_core::compress(&[src.clone(), t.path().join("b.txt")], &whole, Format::Zip, &opts, &ziptool_core::NoProgress).unwrap();
+        let first = t.path().join("vol.zip.001");
+        assert!(t.path().join("vol.zip.002").exists());
+        let o = finish(Task::Extract { archives: vec![first], dest: t.path().join("x5"), opts: Default::default(), smart: false, then });
+        assert!(o.message.contains("壓縮檔已移到資源回收筒"), "{}", o.message);
+        let left: Vec<_> = std::fs::read_dir(t.path()).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with("vol.zip.0") && !n.ends_with(".recycled")).collect();
+        assert!(left.is_empty(), "分割檔應全部移除：{left:?}");
 
         // 沒有勾選：不動
         let ar = make("keep.zip");

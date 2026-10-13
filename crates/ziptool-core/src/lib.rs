@@ -19,7 +19,7 @@ use std::time::SystemTime;
 pub use format::Format;
 pub use hash::{Hashes, hash_files, hash_reader};
 pub use progress::{NoProgress, OverwriteAnswer, Progress};
-pub use volume::{is_first_volume, keep_joined as keep_joined_volumes, parse_size as parse_volume_size};
+pub use volume::{is_first_volume, keep_joined as keep_joined_volumes, parse_size as parse_volume_size, volume_paths};
 pub use util::{describe, format_size, local_time, set_zip_codepage, zip_codepage};
 
 #[derive(Debug)]

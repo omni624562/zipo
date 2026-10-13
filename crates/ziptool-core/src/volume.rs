@@ -25,7 +25,7 @@ fn volume_path(first: &Path, n: usize) -> PathBuf {
 }
 
 /// 依序列出所有分割檔；中間有缺號時回報缺少哪一個
-fn volume_paths(first: &Path) -> Result<Vec<PathBuf>> {
+pub fn volume_paths(first: &Path) -> Result<Vec<PathBuf>> {
     let mut parts = Vec::new();
     let mut n = 1;
     while volume_path(first, n).is_file() {
