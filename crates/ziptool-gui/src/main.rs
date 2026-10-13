@@ -1949,6 +1949,15 @@ impl App {
             .header(CONTROL_H, |mut header| {
                 for (k, (key, label, right)) in cols.iter().enumerate() {
                     header.col(|ui| {
+                        // 整個標題格都可以點（不只是文字），滑過時顯示底色
+                        let cell = ui.max_rect();
+                        let hit = ui.interact(cell, ui.id().with(("sort", k)), Sense::click());
+                        if hit.hovered() {
+                            ui.painter().rect_filled(cell, 0.0, p.hover);
+                        }
+                        if hit.clicked() {
+                            sort_click = Some(*key);
+                        }
                         let layout = if *right { Layout::right_to_left(Align::Center) } else { Layout::left_to_right(Align::Center) };
                         ui.with_layout(layout, |ui| {
                             ui.spacing_mut().item_spacing.x = 4.0;
@@ -1959,10 +1968,7 @@ impl App {
                             }
                             let arrow = if *key == sort_key { if sort_asc { icon::CARET_UP } else { icon::CARET_DOWN } } else { "" };
                             let text = if *right { format!("{arrow} {label}") } else { format!("{label} {arrow}") };
-                            let b = egui::Button::new(RichText::new(text.trim()).size(12.0).color(p.text2)).frame(false);
-                            if ui.add(b).clicked() {
-                                sort_click = Some(*key);
-                            }
+                            ui.add(egui::Label::new(RichText::new(text.trim()).size(12.0).color(p.text2)).selectable(false).sense(Sense::hover()));
                         });
                     });
                 }
@@ -4011,6 +4017,37 @@ mod drag_out_tests {
     }
 
     /// 在列上按住並拖動：拖曳該列（未選取時只拖曳該列）
+    /// 欄位標題：點整個標題格（不只是文字）就排序，與檔案總管相同
+    #[test]
+    fn clicking_anywhere_in_header_sorts() {
+        let t = tempfile::tempdir().unwrap();
+        let root = real_path(t.path());
+        std::fs::write(root.join("a.txt"), "aaaa").unwrap();
+        let ctx = egui::Context::default();
+        let mut app = App::new(Some(root));
+        load(&mut app, &ctx);
+        let frame = |app: &mut App, events: Vec<egui::Event>| {
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(800.0, 600.0))),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(raw, |ui| app.file_table(ui));
+            out.textures_delta.clear();
+        };
+        frame(&mut app, vec![]);
+        // 每個欄位標題的空白處（文字以外）
+        for (x, key) in [(200.0, SortKey::Name), (520.0, SortKey::Modified), (640.0, SortKey::Type), (700.0, SortKey::Size)] {
+            let at = egui::pos2(x, CONTROL_H / 2.0);
+            let press = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+            app.sort_key = if key == SortKey::Name { SortKey::Size } else { SortKey::Name };
+            frame(&mut app, vec![egui::Event::PointerMoved(at), press(true)]);
+            frame(&mut app, vec![egui::Event::PointerMoved(at), press(false)]);
+            frame(&mut app, vec![egui::Event::PointerGone]);
+            assert_eq!(app.sort_key, key, "x = {x}");
+        }
+    }
+
     #[test]
     fn dragging_a_row_requests_drag_out() {
         let t = tempfile::tempdir().unwrap();
