@@ -50,9 +50,50 @@ pub struct AddDialog {
     volume_mb: String,
     pub open_folder: bool,
     error: Option<String>,
+    /// 要壓縮的總大小（資料夾含所有內容）；在背景計算，算好前為 None
+    size: Option<u64>,
+    size_rx: Option<std::sync::mpsc::Receiver<u64>>,
+}
+
+/// 檔案與資料夾（含所有內容）的總大小；不跟隨符號連結
+fn disk_size(paths: &[PathBuf]) -> u64 {
+    let mut total = 0u64;
+    let mut stack: Vec<PathBuf> = paths.to_vec();
+    while let Some(p) = stack.pop() {
+        let Ok(m) = std::fs::symlink_metadata(&p) else { continue };
+        if m.is_dir() {
+            if let Ok(d) = std::fs::read_dir(&p) {
+                stack.extend(d.flatten().map(|e| e.path()));
+            }
+        } else if m.is_file() {
+            total = total.saturating_add(m.len());
+        }
+    }
+    total
 }
 
 impl AddDialog {
+    /// 總大小（算好了才有）
+    fn total_size(&mut self) -> Option<u64> {
+        if self.size.is_none()
+            && let Some(rx) = &self.size_rx
+            && let Ok(n) = rx.try_recv()
+        {
+            self.size = Some(n);
+            self.size_rx = None;
+        }
+        self.size
+    }
+
+    /// 「要壓縮：a、b、c（3 個項目，共 8.2 MB）」
+    fn summary(&mut self) -> String {
+        let names: Vec<String> = self.inputs.iter().take(3).map(|p| file_name(p)).collect();
+        let more = if self.inputs.len() > 3 { L!(" 等", " and more") } else { "" };
+        let n = self.inputs.len();
+        let size = self.total_size().map(crate::human).unwrap_or_else(|| L!("計算中…", "calculating…").into());
+        F!("要壓縮：{}{more}（{n} 個項目，共 {size}）", "To compress: {}{more} ({n} item(s), {size} in total)", names.join(L!("、", ", ")))
+    }
+
     pub fn new(inputs: Vec<PathBuf>, format: Format, level: usize) -> Self {
         let first = &inputs[0];
         let dir = first.parent().unwrap_or(Path::new("."));
@@ -67,6 +108,7 @@ impl AddDialog {
         };
         // 單檔格式只能壓縮一個檔案；上次用單檔格式、這次選多個時改用 zip
         let format = if format.is_single() && (inputs.len() != 1 || first.is_dir()) { Format::Zip } else { format };
+        let inputs_for_size = inputs.clone();
         Self {
             archive: dir.join(format!("{stem}.{}", format.extension())).display().to_string(),
             inputs,
@@ -82,6 +124,15 @@ impl AddDialog {
             volume: 0,
             volume_mb: String::new(),
             error: None,
+            size: None,
+            size_rx: {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let paths = inputs_for_size;
+                std::thread::spawn(move || {
+                    let _ = tx.send(disk_size(&paths));
+                });
+                Some(rx)
+            },
         }
     }
 
@@ -151,9 +202,11 @@ impl AddDialog {
         let p = pal(ui);
         ui.set_width(560.0);
         dialog_title(ui, icon::FILE_ARCHIVE, L!("壓縮", "Compress"));
-        let names: Vec<String> = self.inputs.iter().take(3).map(|p| file_name(p)).collect();
-        let more = if self.inputs.len() > 3 { F!(" 等 {} 個項目", " and {} items in total", self.inputs.len()) } else { String::new() };
-        ui.label(RichText::new(F!("要壓縮：{}{more}", "To compress: {}{more}", names.join(L!("、", ", ")))).color(p.text2));
+        let summary = self.summary();
+        if self.size.is_none() {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        ui.label(RichText::new(summary).color(p.text2));
         ui.add_space(6.0);
 
         field_label(ui, L!("壓縮檔", "Archive"));
@@ -497,6 +550,25 @@ impl PasswordDialog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 「要壓縮」顯示項目數與總大小（資料夾含所有內容，在背景計算）
+    #[test]
+    fn summary_shows_count_and_total_size() {
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path().join("照片");
+        std::fs::create_dir_all(dir.join("子資料夾")).unwrap();
+        std::fs::write(dir.join("a.jpg"), vec![0u8; 1000]).unwrap();
+        std::fs::write(dir.join("子資料夾").join("b.jpg"), vec![0u8; 500]).unwrap();
+        let f = t.path().join("說明.txt");
+        std::fs::write(&f, vec![0u8; 24]).unwrap();
+        let mut d = AddDialog::new(vec![dir, f], Format::Zip, 3);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while d.total_size().is_none() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(d.total_size(), Some(1524));
+        assert_eq!(d.summary(), "要壓縮：照片、說明.txt（2 個項目，共 1.5 KB）");
+    }
 
     /// 密碼只在勾選「設定密碼」時使用；勾選了卻沒輸入時提醒
     #[test]
