@@ -1,4 +1,4 @@
-//! 對話框：加入壓縮檔、解壓縮、密碼。版面與選項參考 7-Zip。
+//! 對話框：壓縮、解壓縮、密碼。版面與選項參考 7-Zip。
 
 use ziptool_core::{F, L};
 use std::path::{Path, PathBuf};
@@ -141,7 +141,7 @@ impl AddDialog {
     pub fn ui(&mut self, ui: &mut egui::Ui) -> Outcome<Task> {
         let p = pal(ui);
         ui.set_width(560.0);
-        dialog_title(ui, icon::FILE_ARCHIVE, L!("加入壓縮檔", "Add to Archive"));
+        dialog_title(ui, icon::FILE_ARCHIVE, L!("壓縮", "Compress"));
 
         field_label(ui, L!("壓縮檔", "Archive"));
         let format = self.format;
@@ -230,7 +230,7 @@ impl AddDialog {
         ui.add_space(8.0);
         let names: Vec<String> = self.inputs.iter().take(3).map(|p| file_name(p)).collect();
         let more = if self.inputs.len() > 3 { F!(" 等 {} 個項目", " and {} items in total", self.inputs.len()) } else { String::new() };
-        ui.label(RichText::new(F!("要加入：{}{more}", "To add: {}{more}", names.join(L!("、", ", ")))).size(12.5).color(p.text2));
+        ui.label(RichText::new(F!("要壓縮：{}{more}", "To compress: {}{more}", names.join(L!("、", ", ")))).size(12.5).color(p.text2));
         ui.add_space(4.0);
         ui.checkbox(&mut self.recycle, L!("壓縮後將原始檔移到資源回收筒", "Move the original files to the Recycle Bin afterwards"))
             .on_hover_text(L!("會先檢查壓縮檔是否完整，確認無誤才移除；可以從資源回收筒還原", "The archive is tested first and the files are removed only if it is intact; they can be restored from the Recycle Bin"));

@@ -19,8 +19,8 @@ pub const ARCHIVE_EXTS: [&str; 12] = [".zip", ".7z", ".tar", ".gz", ".tgz", ".bz
 fn verbs(exe: &Path) -> Vec<(String, &'static str, String)> {
     let exe = exe.display();
     let mut v = vec![
-        (r"*\shell\ZipTool.Add".to_string(), L!("加入壓縮檔（Zipo）…", "Add to archive (Zipo)…"), format!("\"{exe}\" --add \"%1\"")),
-        (r"Directory\shell\ZipTool.Add".to_string(), L!("加入壓縮檔（Zipo）…", "Add to archive (Zipo)…"), format!("\"{exe}\" --add \"%1\"")),
+        (r"*\shell\ZipTool.Add".to_string(), L!("用 Zipo 壓縮…", "Compress with Zipo…"), format!("\"{exe}\" --add \"%1\"")),
+        (r"Directory\shell\ZipTool.Add".to_string(), L!("用 Zipo 壓縮…", "Compress with Zipo…"), format!("\"{exe}\" --add \"%1\"")),
     ];
     for ext in ARCHIVE_EXTS {
         let base = format!(r"SystemFileAssociations\{ext}\shell");
@@ -67,14 +67,19 @@ pub fn is_installed(root: &str) -> bool {
     RegKey::predef(HKEY_CURRENT_USER).open_subkey(format!(r"{root}\*\shell\ZipTool.Add")).is_ok()
 }
 
-/// 啟動時呼叫：已加入右鍵選單或已註冊預設程式，但缺少新版才有的項目（例如 .001）時補上；
-/// 使用者沒有啟用的不會自行加上
+/// 啟動時呼叫：已加入右鍵選單或已註冊預設程式，但缺少新版才有的項目（例如 .001）、
+/// 選單文字或命令與目前不同（新版改了文字、切換了介面語言、程式搬了位置）時更新；使用者沒有啟用的不會自行加上
 #[cfg(windows)]
 pub fn refresh(root: &str, base: &str, exe: &Path) {
     use winreg::RegKey;
     use winreg::enums::HKEY_CURRENT_USER;
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    if is_installed(root) && verbs(exe).iter().any(|(key, _, _)| hkcu.open_subkey(format!(r"{root}\{key}\command")).is_err()) {
+    let outdated = |key: &str, label: &str, command: &str| {
+        let label_now: Option<String> = hkcu.open_subkey(format!(r"{root}\{key}")).and_then(|k| k.get_value("MUIVerb")).ok();
+        let command_now: Option<String> = hkcu.open_subkey(format!(r"{root}\{key}\command")).and_then(|k| k.get_value("")).ok();
+        label_now.as_deref() != Some(label) || command_now.as_deref() != Some(command)
+    };
+    if is_installed(root) && verbs(exe).iter().any(|(key, label, command)| outdated(key, label, command)) {
         let _ = install(root, exe);
     }
     let missing = |ext: &str| {
@@ -339,7 +344,7 @@ mod tests {
         let cmd: String = hkcu.open_subkey(format!(r"{root}\SystemFileAssociations\.7z\shell\ZipTool.ExtractHere\command")).unwrap().get_value("").unwrap();
         assert_eq!(cmd, r#""C:\Program Files\Zipo\zipo-gui.exe" --extract-here "%1""#);
         let label: String = hkcu.open_subkey(format!(r"{root}\Directory\shell\ZipTool.Add")).unwrap().get_value("MUIVerb").unwrap();
-        assert_eq!(label, "加入壓縮檔（Zipo）…");
+        assert_eq!(label, "用 Zipo 壓縮…");
 
         uninstall(&root).unwrap();
         assert!(!is_installed(&root));
@@ -368,6 +373,16 @@ mod tests {
         refresh(&root, &base, exe);
         assert!(hkcu.open_subkey(format!(r"{root}\SystemFileAssociations\.001\shell\ZipTool.Open")).is_ok());
         assert!(hkcu.open_subkey(format!(r"{base}\Classes\.001\OpenWithProgids")).unwrap().get_raw_value(PROG_ID).is_ok());
+
+        // 舊版的選單文字（或程式搬了位置）：啟動時更新
+        hkcu.open_subkey_with_flags(format!(r"{root}\*\shell\ZipTool.Add"), winreg::enums::KEY_SET_VALUE).unwrap().set_value("MUIVerb", &"加入壓縮檔（Zipo）…").unwrap();
+        refresh(&root, &base, exe);
+        let label: String = hkcu.open_subkey(format!(r"{root}\*\shell\ZipTool.Add")).unwrap().get_value("MUIVerb").unwrap();
+        assert_eq!(label, "用 Zipo 壓縮…");
+        let moved = Path::new(r"D:\Apps\Zipo\zipo-gui.exe");
+        refresh(&root, &base, moved);
+        let cmd: String = hkcu.open_subkey(format!(r"{root}\SystemFileAssociations\.zip\shell\ZipTool.Open\command")).unwrap().get_value("").unwrap();
+        assert_eq!(cmd, r#""D:\Apps\Zipo\zipo-gui.exe" "%1""#);
 
         // 沒有註冊過的不會自行加上
         uninstall(&root).unwrap();

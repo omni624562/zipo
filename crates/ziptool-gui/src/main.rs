@@ -1130,7 +1130,7 @@ impl App {
         }
         let paths: Vec<PathBuf> = self.selected_rows().iter().filter(|r| !r.is_drive).filter_map(|r| self.row_path(r)).collect();
         if paths.is_empty() {
-            return self.notice(L!("加入", "Add"), L!("請先選取要加入壓縮檔的檔案或資料夾。", "Select the files or folders to compress first."));
+            return self.notice(L!("壓縮", "Compress"), L!("請先選取要壓縮的檔案或資料夾。", "Select the files or folders to compress first."));
         }
         self.dialog = Some(Dialog::Add(self.with_open_after_add(AddDialog::new(paths, self.add_format, self.add_level))));
     }
