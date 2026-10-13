@@ -1,0 +1,58 @@
+# 推送版本標籤（例如 v0.4.4）時：在 GitHub Actions 從原始碼建置 Windows 64 位元版、打包並建立 Release。
+# 附件名稱與內容必須符合線上更新的格式（zipo-<版本>-windows-x64.zip，內含 zipo-gui.exe 與 zipo.exe）。
+# Release 說明取自 docs/releases/<標籤>.md。第三方 actions 固定到 commit SHA（後面註明版本）。
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: windows-latest
+    # 只有這個工作需要建立 Release
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ github.ref_name }}
+      TARGET: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: 檢查版本號與說明檔
+        shell: bash
+        run: |
+          v="${TAG#v}"
+          for c in crates/ziptool-core crates/ziptool-cli crates/ziptool-gui; do
+            grep -q "^version = \"$v\"" "$c/Cargo.toml" || { echo "標籤 $TAG 與 $c/Cargo.toml 的版本不一致"; exit 1; }
+          done
+          test -f "docs/releases/$TAG.md" || { echo "缺少 docs/releases/$TAG.md"; exit 1; }
+      - name: 測試
+        run: cargo test --workspace --target $env:TARGET
+      - name: 建置
+        run: cargo build --release --target $env:TARGET
+      - name: 打包並測試壓縮檔
+        shell: pwsh
+        run: |
+          $v = $env:TAG.TrimStart('v')
+          $name = "zipo-$v-windows-x64"
+          $bin = "target/$env:TARGET/release"
+          New-Item -ItemType Directory $name | Out-Null
+          Copy-Item "$bin/zipo-gui.exe", "$bin/zipo.exe", LICENSE, README.md $name
+          $env:ZIPO_LANG = 'en'
+          & "$bin/zipo.exe" a "$name.zip" $name -bd
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          & "$bin/zipo.exe" t "$name.zip" -bd
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          & "$bin/zipo.exe" l "$name.zip"
+          "ASSET=$name.zip" | Out-File -Append $env:GITHUB_ENV
+      - name: 建立 Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$TAG" "$ASSET" --title "Zipo ${TAG#v}" --notes-file "docs/releases/$TAG.md" --verify-tag
