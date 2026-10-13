@@ -61,8 +61,17 @@ pub(crate) fn join_if_split(archive: &Path) -> Result<Option<Joined>> {
     }
     let parts = volume_paths(archive)?;
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    let dir = std::env::temp_dir().join("Zipo").join(format!("join-{}-{stamp}", std::process::id()));
-    std::fs::create_dir_all(&dir)?;
+    // Windows 的暫存資料夾每位使用者各一個，放在 Zipo 底下以便清理；Unix 的 /tmp 是共用的，
+    // 其他使用者可以先建立 /tmp/Zipo 再替換其中的資料夾，所以直接放在 /tmp 並只允許自己存取
+    let parent = if cfg!(windows) { std::env::temp_dir().join("Zipo") } else { std::env::temp_dir() };
+    std::fs::create_dir_all(&parent)?;
+    let dir = parent.join(format!("zipo-join-{}-{stamp}", std::process::id()));
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    // 不用 create_dir_all：資料夾已存在（被搶先建立）時失敗
+    builder.create(&dir)?;
     let joined = Joined { path: dir.join(archive.with_extension("").file_name().unwrap_or_default()), dir };
     let mut out = io::BufWriter::new(File::create(&joined.path)?);
     for p in &parts {
@@ -170,6 +179,13 @@ mod tests {
         assert_eq!(joined.path.file_name().unwrap(), "a.zip");
         assert_eq!(std::fs::read(&joined.path).unwrap(), data);
         let dir = joined.dir.clone();
+        // Unix：不放在共用的 /tmp/Zipo 底下，且只有自己能存取
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(dir.parent().unwrap(), std::env::temp_dir());
+            assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+        }
         drop(joined);
         assert!(!dir.exists(), "暫存檔應刪除");
 
