@@ -509,12 +509,14 @@ fn send_to_recycle_bin(paths: &[PathBuf]) -> std::io::Result<()> {
     Ok(())
 }
 
-/// 把檔案或資料夾移到資源回收筒（可以還原，不會永久刪除）
+/// 把檔案或資料夾移到資源回收筒（可以還原）。
+/// 無法回收時（網路磁碟、部分隨身碟、檔案大於資源回收筒容量）Windows 會改成永久刪除，
+/// 這時一定先跳出警告讓使用者決定；選擇不刪除則視為失敗，檔案保留不動。
 #[cfg(windows)]
 #[cfg_attr(test, allow(dead_code))]
 pub fn recycle(paths: &[PathBuf]) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
-    use windows::Win32::UI::Shell::{FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, SHFILEOPSTRUCTW, SHFileOperationW};
+    use windows::Win32::UI::Shell::{FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, FOF_WANTNUKEWARNING, SHFILEOPSTRUCTW, SHFileOperationW};
     if paths.is_empty() {
         return Ok(());
     }
@@ -529,7 +531,8 @@ pub fn recycle(paths: &[PathBuf]) -> std::io::Result<()> {
     let mut op = SHFILEOPSTRUCTW {
         wFunc: FO_DELETE,
         pFrom: windows::core::PCWSTR(list.as_ptr()),
-        fFlags: (FOF_ALLOWUNDO.0 | FOF_NOCONFIRMATION.0 | FOF_SILENT.0 | FOF_NOERRORUI.0) as u16,
+        // FOF_WANTNUKEWARNING：要永久刪除時仍會詢問（蓋過 FOF_NOCONFIRMATION）
+        fFlags: (FOF_ALLOWUNDO.0 | FOF_NOCONFIRMATION.0 | FOF_SILENT.0 | FOF_NOERRORUI.0 | FOF_WANTNUKEWARNING.0) as u16,
         ..Default::default()
     };
     // SAFETY: 路徑清單在呼叫期間有效，結構依 Windows 的定義建立
