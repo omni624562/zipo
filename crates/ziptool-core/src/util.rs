@@ -331,7 +331,10 @@ impl<'a> Planner<'a> {
             m => m,
         };
         Ok(match mode {
-            Overwrite::Skip => None,
+            Overwrite::Skip => {
+                self.report.borrow_mut().skipped += 1;
+                None
+            }
             Overwrite::Rename => Some(unique_name(path)),
             _ => Some(path.to_path_buf()),
         })

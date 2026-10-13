@@ -196,6 +196,8 @@ pub struct ExtractReport {
     pub files: u64,
     pub bytes: u64,
     pub issues: Vec<Issue>,
+    /// 目的地已有同名檔案而略過（使用者選擇的，不算錯誤）
+    pub skipped: u64,
 }
 
 /// 測試結果。

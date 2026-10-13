@@ -312,7 +312,7 @@ fn run(task: Task, s: &Shared) -> Result<Outcome, Error> {
         }
         Task::Extract { archives, dest, opts, smart, then } => {
             let n = archives.len();
-            let (mut files, mut bytes, mut issues) = (0, 0, Vec::new());
+            let (mut files, mut bytes, mut issues, mut skipped) = (0, 0, Vec::new(), 0);
             let mut shown = dest.clone();
             for (i, ar) in archives.iter().enumerate() {
                 stage(s, i, n, ar);
@@ -327,6 +327,7 @@ fn run(task: Task, s: &Shared) -> Result<Outcome, Error> {
                 files += r.files;
                 bytes += r.bytes;
                 issues.extend(r.issues);
+                skipped += r.skipped;
             }
             let title = if issues.is_empty() { L!("解壓縮完成", "Extraction complete") } else { L!("解壓縮完成，但有項目被略過", "Extraction complete, but some items were skipped") };
             let mut message = F!(
@@ -335,9 +336,9 @@ fn run(task: Task, s: &Shared) -> Result<Outcome, Error> {
                 human(bytes),
                 started.elapsed().as_secs_f32()
             );
-            // 只解出部分項目或有項目被略過時，壓縮檔保留不動
+            // 只解出部分項目、有項目被略過或保留了目的地原有的檔案時，壓縮檔保留不動
             if then.recycle {
-                message += &if !issues.is_empty() || opts.selection.is_some() {
+                message += &if !issues.is_empty() || skipped > 0 || opts.selection.is_some() {
                     L!("\n\n有項目未解出，壓縮檔保留不動。", "\n\nSome items were not extracted; the archive was kept.").to_string()
                 } else {
                     match send_to_recycle_bin(&archives) {
@@ -599,6 +600,16 @@ mod then_tests {
         let o = finish(Task::Extract { archives: vec![ar.clone()], dest: t.path().join("x2"), opts, smart: false, then });
         assert!(o.message.contains("壓縮檔保留不動"), "{}", o.message);
         assert!(ar.exists());
+
+        // 目的地已有同名檔案、選擇略過：解出的不是壓縮檔裡的版本，壓縮檔保留
+        let ar = make("skip.zip");
+        std::fs::create_dir_all(t.path().join("x4")).unwrap();
+        std::fs::write(t.path().join("x4/a.txt"), "舊版").unwrap();
+        let opts = ExtractOptions { overwrite: ziptool_core::Overwrite::Skip, ..Default::default() };
+        let o = finish(Task::Extract { archives: vec![ar.clone()], dest: t.path().join("x4"), opts, smart: false, then });
+        assert!(o.message.contains("壓縮檔保留不動"), "{}", o.message);
+        assert!(ar.exists());
+        assert_eq!(std::fs::read_to_string(t.path().join("x4/a.txt")).unwrap(), "舊版");
 
         // 沒有勾選：不動
         let ar = make("keep.zip");
