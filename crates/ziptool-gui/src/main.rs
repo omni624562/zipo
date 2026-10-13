@@ -548,6 +548,8 @@ struct App {
     addr_editing: bool,
     /// Shift+方向鍵延伸選取時，移動的那一端
     cursor: Option<usize>,
+    /// 視窗標題目前對應的位置
+    titled: Option<Location>,
     /// 直接打字跳到檔案
     typeahead: String,
     typeahead_at: std::time::Instant,
@@ -615,6 +617,7 @@ impl App {
             history_nav: false,
             addr_editing: false,
             cursor: None,
+            titled: None,
             typeahead: String::new(),
             typeahead_at: std::time::Instant::now(),
             add_format: Format::Zip,
@@ -1799,6 +1802,12 @@ impl App {
     }
 
     /// 網址列上分段顯示的路徑：每一段都可以點選前往。
+    /// 視窗標題：目前位置的名稱（與網址列最後一段相同）
+    fn window_title(&self) -> String {
+        let here = self.breadcrumbs().pop().map(|c| c.0).unwrap_or_default();
+        if here.is_empty() { "Zipo".into() } else { format!("{here} - Zipo") }
+    }
+
     fn breadcrumbs(&self) -> Vec<(String, Location)> {
         fn dir_parts(dir: &Path) -> Vec<(String, Location)> {
             let mut out = vec![(L!("本機", "This PC").to_string(), Location::Computer)];
@@ -2972,6 +2981,11 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         FIRST_FRAME.store(true, std::sync::atomic::Ordering::Relaxed);
         let ctx = ui.ctx().clone();
+        // 位置改變時更新視窗標題（工作列上好分辨）
+        if self.titled.as_ref() != Some(&self.loc) {
+            self.titled = Some(self.loc.clone());
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.window_title()));
+        }
         if ctx.input(|i| i.viewport().close_requested())
             && let Some(job) = &self.job
         {
@@ -4044,6 +4058,22 @@ mod crumb_tests {
         assert_eq!(first_visible_crumb(&[80.0, 80.0, 80.0, 80.0], 200.0, 30.0), 2);
         // 最後一段一定顯示，即使本身就超過寬度
         assert_eq!(first_visible_crumb(&[80.0, 500.0], 200.0, 30.0), 1);
+    }
+
+    /// 視窗標題顯示目前位置（與網址列最後一段相同），工作列上好分辨
+    #[test]
+    fn window_title_shows_location() {
+        let t = tempfile::tempdir().unwrap();
+        let root = real_path(t.path());
+        std::fs::create_dir(root.join("報告")).unwrap();
+        let mut app = App::new(Some(root.join("報告")));
+        assert_eq!(app.window_title(), "報告 - Zipo");
+        app.loc = Location::Archive { path: root.join("專案.zip"), inner: String::new() };
+        assert_eq!(app.window_title(), "專案.zip - Zipo");
+        app.loc = Location::Archive { path: root.join("專案.zip"), inner: "docs/圖片".into() };
+        assert_eq!(app.window_title(), "圖片 - Zipo");
+        app.loc = Location::Computer;
+        assert_eq!(app.window_title(), "本機 - Zipo");
     }
 
     #[test]
