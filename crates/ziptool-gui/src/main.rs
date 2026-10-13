@@ -21,6 +21,8 @@ mod widgets;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
 
@@ -382,12 +384,20 @@ struct Preview {
     size: Option<u64>,
     modified: Option<SystemTime>,
     state: PreviewState,
+    /// 選取改變或關閉預覽時設為 true，背景中還在解壓縮的工作立即停止
+    cancel: Arc<AtomicBool>,
     texture: Option<egui::TextureHandle>,
 }
 
 enum PreviewState {
     Loading(JoinHandle<preview::Content>),
     Ready(preview::Content),
+}
+
+impl Drop for Preview {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
 }
 
 /// 拖曳時已解出的項目；壓縮檔沒有變動時，再次拖曳同樣的項目不必重新解壓縮
@@ -1271,6 +1281,7 @@ impl App {
             }
             return;
         }
+        let cancel = Arc::new(AtomicBool::new(false));
         let state = if preview::kind(&row.name).is_none() {
             PreviewState::Ready(preview::Content::Unavailable(String::new()))
         } else {
@@ -1282,7 +1293,8 @@ impl App {
                 Location::Archive { path, inner } if row.size.unwrap_or(0) <= preview::MAX_ARCHIVE_PREVIEW => {
                     let (archive, strip, entry) = (path.clone(), inner.clone(), self.inner_name(&row));
                     let password = self.cache.as_ref().and_then(|c| c.password.clone());
-                    PreviewState::Loading(std::thread::spawn(move || preview_inside(&archive, &entry, &strip, password)))
+                    let cancel = cancel.clone();
+                    PreviewState::Loading(std::thread::spawn(move || preview_inside(&archive, &entry, &strip, password, cancel)))
                 }
                 Location::Archive { .. } => PreviewState::Ready(preview::Content::Unavailable(F!(
                     "超過 {} 的檔案不預覽", "Files larger than {} are not previewed",
@@ -1291,7 +1303,7 @@ impl App {
                 Location::Computer => return,
             }
         };
-        self.preview = Some(Preview { key, name: row.display.clone(), size: row.size, modified: row.modified, state, texture: None });
+        self.preview = Some(Preview { key, name: row.display.clone(), size: row.size, modified: row.modified, state, cancel, texture: None });
     }
 
     fn preview_pane(&mut self, ui: &mut egui::Ui) {
@@ -2650,7 +2662,13 @@ fn is_executable(name: &str) -> bool {
 }
 
 /// 解出壓縮檔內的單一檔案到暫存資料夾後讀取預覽，再刪除暫存資料夾
-fn preview_inside(archive: &Path, entry: &str, strip: &str, password: Option<String>) -> preview::Content {
+fn preview_inside(archive: &Path, entry: &str, strip: &str, password: Option<String>, cancel: Arc<AtomicBool>) -> preview::Content {
+    struct Cancel(Arc<AtomicBool>);
+    impl ziptool_core::Progress for Cancel {
+        fn is_cancelled(&self) -> bool {
+            self.0.load(Ordering::Relaxed)
+        }
+    }
     let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     let dir = std::env::temp_dir().join("Zipo").join(format!("{}-preview-{stamp}", std::process::id()));
     // 宣告的大小可能造假：實際寫出超過上限就停止
@@ -2661,7 +2679,7 @@ fn preview_inside(archive: &Path, entry: &str, strip: &str, password: Option<Str
         max_bytes: Some(preview::MAX_ARCHIVE_PREVIEW),
         ..Default::default()
     };
-    let content = match ziptool_core::extract(archive, &dir, &opts, &ziptool_core::NoProgress) {
+    let content = match ziptool_core::extract(archive, &dir, &opts, &Cancel(cancel)) {
         // 解出的檔名可能經過清理（例如 C:x.txt → C_x.txt），不可用項目名稱組路徑
         Ok(r) if r.issues.is_empty() => match jobs::extracted_file(&dir) {
             Some(file) => preview::load(&file),
@@ -4322,7 +4340,7 @@ mod preview_tests {
         z.start_file("C:x.txt", zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored)).unwrap();
         std::io::Write::write_all(&mut z, "壓縮檔內的內容".as_bytes()).unwrap();
         z.finish().unwrap();
-        assert!(matches!(preview_inside(&odd, "C:x.txt", "", None), preview::Content::Text { text, .. } if text == "壓縮檔內的內容"));
+        assert!(matches!(preview_inside(&odd, "C:x.txt", "", None, Default::default()), preview::Content::Text { text, .. } if text == "壓縮檔內的內容"));
 
         // 宣告的大小造假（實際超過預覽上限）：寫到上限就停止，不會解出整個檔案
         let liar = root.join("liar.zip");
@@ -4333,7 +4351,27 @@ mod preview_tests {
             std::io::Write::write_all(&mut z, &block).unwrap();
         }
         z.finish().unwrap();
-        assert!(matches!(preview_inside(&liar, "big.txt", "", None), preview::Content::Unavailable(m) if m.contains("不預覽")));
+        assert!(matches!(preview_inside(&liar, "big.txt", "", None, Default::default()), preview::Content::Unavailable(m) if m.contains("不預覽")));
+
+        // 已取消：不解壓縮，也不留下暫存資料夾（這時沒有其他背景預覽）
+        let previews = || -> Vec<std::ffi::OsString> {
+            std::fs::read_dir(std::env::temp_dir().join("Zipo"))
+                .map(|d| d.flatten().map(|e| e.file_name()).filter(|n| n.to_string_lossy().starts_with(&format!("{}-preview-", std::process::id()))).collect())
+                .unwrap_or_default()
+        };
+        let before = previews();
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        assert!(matches!(preview_inside(&odd, "C:x.txt", "", None, done), preview::Content::Unavailable(_)));
+        assert!(previews().iter().all(|n| before.contains(n)), "取消後不應留下暫存資料夾");
+
+        // 選取改變（或關閉預覽）時，前一個還在解壓縮的預覽立即停止
+        let i = app.rows.iter().position(|r| r.name == "note.txt").unwrap();
+        app.sel = [i].into();
+        app.update_preview(&ctx);
+        let cancel = app.preview.as_ref().unwrap().cancel.clone();
+        assert!(!cancel.load(std::sync::atomic::Ordering::Relaxed));
+        app.preview = None;
+        assert!(cancel.load(std::sync::atomic::Ordering::Relaxed), "前一個預覽應取消");
 
         // 沒有選取或選取多個：不預覽
         app.sel = [0, 1].into();
