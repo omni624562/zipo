@@ -107,16 +107,67 @@ pub fn input_frame(ui: &mut egui::Ui, lead: &str, add: impl FnOnce(&mut egui::Ui
         .response
 }
 
+/// 放不下時從中間省略：保留開頭約三分之一、結尾約三分之二（檔名、目的資料夾最重要）
+pub fn elide_middle(text: &str, max: f32, width: impl Fn(&str) -> f32) -> String {
+    if width(text) <= max {
+        return text.to_string();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let make = |keep: usize| {
+        let head = keep / 3;
+        let tail = keep - head;
+        let mut s: String = chars[..head].iter().collect();
+        s.push('…');
+        s.extend(&chars[chars.len() - tail..]);
+        s
+    };
+    // 找出放得下的最多字數
+    let (mut lo, mut hi) = (0, chars.len() - 1);
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if width(&make(mid)) <= max { lo = mid } else { hi = mid - 1 }
+    }
+    make(lo)
+}
+
 /// 路徑欄位，回傳是否按下「瀏覽」。
+/// 沒有在編輯時，太長的路徑從中間省略（保留檔名），滑過時顯示完整路徑；點一下即可編輯。
 pub fn path_field(ui: &mut egui::Ui, lead: &str, value: &mut String) -> bool {
     let mut clicked = false;
+    let edit_id = ui.id().with(("path_field", lead));
+    let editing = ui.data(|d| d.get_temp::<bool>(edit_id)).unwrap_or(false);
     input_frame(ui, lead, |ui| {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             clicked = link(ui, L!("瀏覽…", "Browse…")).clicked();
-            ui.add(egui::TextEdit::singleline(value).frame(egui::Frame::NONE).desired_width(ui.available_width()));
+            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                if editing {
+                    let r = ui.add(egui::TextEdit::singleline(value).id(edit_id).frame(egui::Frame::NONE).desired_width(ui.available_width()));
+                    if r.lost_focus() {
+                        ui.data_mut(|d| d.insert_temp(edit_id, false));
+                    }
+                } else {
+                    let font = TextStyle::Body.resolve(ui.style());
+                    let color = ui.visuals().text_color();
+                    let max = ui.available_width() - 4.0;
+                    let shown = elide_middle(value, max, |t| ui.fonts_mut(|f| f.layout_no_wrap(t.to_string(), font.clone(), color).size().x));
+                    let r = ui.add(egui::Label::new(shown).sense(Sense::click()).truncate()).on_hover_cursor(egui::CursorIcon::Text);
+                    let r = if r.rect.width() > 0.0 && shown_differs(value, max, ui) { r.on_hover_text(value.as_str()) } else { r };
+                    // 點整個欄位都能開始編輯
+                    if r.clicked() || ui.interact(ui.max_rect(), edit_id.with("area"), Sense::click()).clicked() {
+                        ui.data_mut(|d| d.insert_temp(edit_id, true));
+                        ui.memory_mut(|m| m.request_focus(edit_id));
+                    }
+                }
+            });
         });
     });
     clicked
+}
+
+/// 顯示的路徑是否經過省略（是的話滑過時顯示完整路徑）
+fn shown_differs(value: &str, max: f32, ui: &egui::Ui) -> bool {
+    let font = TextStyle::Body.resolve(ui.style());
+    ui.fonts_mut(|f| f.layout_no_wrap(value.to_string(), font, egui::Color32::WHITE).size().x) > max
 }
 
 pub fn password_field(ui: &mut egui::Ui, value: &mut String, show: bool, hint: &str) -> egui::Response {
@@ -184,6 +235,47 @@ pub fn error_text(ui: &mut egui::Ui, msg: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 太長的路徑從中間省略：保留開頭（磁碟）與結尾（檔名），不超過可用寬度
+    #[test]
+    fn long_paths_keep_their_end() {
+        let width = |t: &str| t.chars().count() as f32;
+        let path = r"C:\Users\nan\AppData\Local\Temp\claude\project\release043\zipo-0.4.3.zip";
+        let short = elide_middle(path, 32.0, width);
+        assert!(short.starts_with("C:\\") && short.ends_with("zipo-0.4.3.zip") && short.contains('…'), "{short}");
+        assert!(width(&short) <= 32.0, "{short}");
+        // 放得下：不變
+        assert_eq!(elide_middle(r"C:\a\b.zip", 32.0, width), r"C:\a\b.zip");
+        // 連檔名都放不下：至少保留檔名的結尾
+        let tiny = elide_middle(path, 8.0, width);
+        assert!(tiny.contains('…') && tiny.ends_with(".zip") && width(&tiny) <= 8.0, "{tiny}");
+    }
+
+    /// 路徑欄位：平常顯示省略後的路徑，點一下就能編輯，輸入的文字寫回欄位
+    #[test]
+    fn path_field_becomes_editable_on_click() {
+        let ctx = egui::Context::default();
+        let mut value = r"C:\Users\nan\AppData\Local\Temp\claude\很長的資料夾名稱\再一層\out".to_string();
+        let frame = |events: Vec<egui::Event>, value: &mut String| {
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(300.0, 100.0))),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(raw, |ui| {
+                path_field(ui, "", value);
+            });
+            out.textures_delta.clear();
+        };
+        frame(vec![], &mut value);
+        let at = egui::pos2(60.0, 16.0);
+        let btn = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        frame(vec![egui::Event::PointerMoved(at), btn(true)], &mut value);
+        frame(vec![egui::Event::PointerMoved(at), btn(false)], &mut value);
+        frame(vec![], &mut value);
+        frame(vec![egui::Event::Key { key: egui::Key::End, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }, egui::Event::Text("2".into())], &mut value);
+        assert!(value.ends_with("out2"), "{value}");
+    }
 
     /// 密碼欄不可保留復原紀錄：egui 會把每次輸入的內容以明文存在記憶體中，對話框關閉後仍在
     #[test]
