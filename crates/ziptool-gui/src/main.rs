@@ -2611,11 +2611,11 @@ fn preview_inside(archive: &Path, entry: &str, strip: &str, password: Option<Str
     let dir = std::env::temp_dir().join("Zipo").join(format!("{}-preview-{stamp}", std::process::id()));
     let opts = ziptool_core::ExtractOptions { password, selection: Some(vec![entry.to_string()]), strip_prefix: strip.to_string(), ..Default::default() };
     let content = match ziptool_core::extract(archive, &dir, &opts, &ziptool_core::NoProgress) {
-        Ok(r) if r.issues.is_empty() => {
-            let rel = entry.strip_prefix(&format!("{strip}/")).unwrap_or(entry);
-            let file = dir.join(rel);
-            if file.is_file() { preview::load(&file) } else { preview::Content::Unavailable(L!("無法讀取這個項目", "Cannot read this item").into()) }
-        }
+        // 解出的檔名可能經過清理（例如 C:x.txt → C_x.txt），不可用項目名稱組路徑
+        Ok(r) if r.issues.is_empty() => match jobs::extracted_file(&dir) {
+            Some(file) => preview::load(&file),
+            None => preview::Content::Unavailable(L!("無法讀取這個項目", "Cannot read this item").into()),
+        },
         Ok(r) => preview::Content::Unavailable(r.issues.first().map(|i| i.reason.clone()).unwrap_or_default()),
         Err(Error::PasswordRequired | Error::WrongPassword) => preview::Content::Unavailable(L!("需要密碼才能預覽", "A password is required to preview").into()),
         Err(e) => preview::Content::Unavailable(e.to_string()),
@@ -4124,6 +4124,14 @@ mod preview_tests {
         assert!(matches!(preview_of(&mut app, &ctx, "pic.png"), preview::Content::Image(_, [40, 30])));
         assert!(matches!(preview_of(&mut app, &ctx, "note.txt"), preview::Content::Text { text, truncated: false } if text == "預覽內容"));
         assert!(matches!(preview_of(&mut app, &ctx, "tool.exe"), preview::Content::Unavailable(m) if m.is_empty()));
+
+        // 名稱含磁碟代號（C:x.txt）的項目：預覽的是實際解出的檔案，而不是 C: 磁碟上的其他檔案
+        let odd = root.join("odd.zip");
+        let mut z = zip::ZipWriter::new(std::fs::File::create(&odd).unwrap());
+        z.start_file("C:x.txt", zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored)).unwrap();
+        std::io::Write::write_all(&mut z, "壓縮檔內的內容".as_bytes()).unwrap();
+        z.finish().unwrap();
+        assert!(matches!(preview_inside(&odd, "C:x.txt", "", None), preview::Content::Text { text, .. } if text == "壓縮檔內的內容"));
 
         // 沒有選取或選取多個：不預覽
         app.sel = [0, 1].into();

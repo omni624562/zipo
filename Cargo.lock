@@ -6116,6 +6116,7 @@ dependencies = [
  "windows 0.62.2",
  "winreg",
  "zeroize",
+ "zip",
  "ziptool-core",
 ]
 

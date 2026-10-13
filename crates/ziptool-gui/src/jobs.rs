@@ -459,7 +459,7 @@ fn run(task: Task, s: &Shared) -> Result<Outcome, Error> {
 /// 開啟壓縮檔內的檔案時，暫存資料夾是新建的且只解出那一個檔案：直接找出它實際的位置。
 /// 不可用項目名稱組路徑：名稱在解壓時會被清理（例如 `C:x` → `C_x`），
 /// 而 `dir.join("C:x")` 會丟掉 `dir`，變成指向資料夾之外的另一個檔案。
-fn extracted_file(dir: &Path) -> Option<PathBuf> {
+pub(crate) fn extracted_file(dir: &Path) -> Option<PathBuf> {
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
         for e in std::fs::read_dir(&d).ok()?.flatten() {
