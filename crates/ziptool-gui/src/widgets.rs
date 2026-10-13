@@ -331,6 +331,40 @@ mod tests {
         assert_eq!(ctx.memory(|m| m.focused()), Some(primary), "Tab 先到主要按鈕");
     }
 
+    /// 路徑欄位的「瀏覽…」：看得到、點得到（不可被「點欄位就編輯」的感應區蓋住）；編輯中也一樣
+    #[test]
+    fn path_field_browse_is_visible_and_clickable() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut value = r"C:\Users\nan\Downloads".to_string();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(500.0, 100.0));
+        let mut clicked = false;
+        let frame = |events: Vec<egui::Event>, value: &mut String, clicked: &mut bool| -> Option<egui::Rect> {
+            let mut out = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), events, ..Default::default() }, |ui| {
+                *clicked |= path_field(ui, icon::FOLDER, value);
+            });
+            out.textures_delta.clear();
+            out.platform_output.accesskit_update.unwrap().nodes.iter().find(|(_, n)| n.label().is_some_and(|l| l.contains("瀏覽"))).and_then(|(_, n)| {
+                let b = n.bounds()?;
+                Some(egui::Rect::from_min_max(egui::pos2(b.x0 as f32, b.y0 as f32), egui::pos2(b.x1 as f32, b.y1 as f32)))
+            })
+        };
+        let browse = frame(vec![], &mut value, &mut clicked).expect("應顯示「瀏覽…」");
+        assert!(screen.contains_rect(browse), "「瀏覽…」應在畫面內：{browse:?}");
+        let at = browse.center();
+        let btn = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        frame(vec![egui::Event::PointerMoved(at), btn(true)], &mut value, &mut clicked);
+        frame(vec![egui::Event::PointerMoved(at), btn(false)], &mut value, &mut clicked);
+        assert!(clicked, "點「瀏覽…」應開啟選擇資料夾的視窗");
+        // 進入編輯後，「瀏覽…」仍然在
+        let field = egui::pos2(60.0, browse.center().y);
+        let b2 = |pressed| egui::Event::PointerButton { pos: field, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        frame(vec![egui::Event::PointerMoved(field), b2(true)], &mut value, &mut clicked);
+        frame(vec![egui::Event::PointerMoved(field), b2(false)], &mut value, &mut clicked);
+        let browse2 = frame(vec![], &mut value, &mut clicked).expect("編輯中也應顯示「瀏覽…」");
+        assert!(screen.contains_rect(browse2), "{browse2:?}");
+    }
+
     /// 路徑欄位：平常顯示省略後的路徑，點一下就能編輯，輸入的文字寫回欄位
     #[test]
     fn path_field_becomes_editable_on_click() {
