@@ -588,6 +588,8 @@ struct App {
     /// 開發版截圖：保持「⋯」選單打開
     #[cfg(debug_assertions)]
     shot_menu: bool,
+    #[cfg(debug_assertions)]
+    shot_view_menu: bool,
 }
 
 impl App {
@@ -645,6 +647,8 @@ impl App {
             devshot: None,
             #[cfg(debug_assertions)]
             shot_menu: false,
+            #[cfg(debug_assertions)]
+            shot_view_menu: false,
         };
         let get = |k: &str| storage.and_then(|s| s.get_string(k));
         app.auto_update = get("auto_update").as_deref() != Some("0");
@@ -1617,28 +1621,44 @@ impl App {
 
     /// 「檢視」選單：重新整理、排序、顯示系統項目、ZIP 檔名編碼、深淺色
     fn view_menu(&mut self, ui: &mut egui::Ui) {
-        ui.set_min_width(220.0);
-        if ui.button(F!("{}  重新整理\tF5", "{}  Refresh\tF5", icon::ARROWS_CLOCKWISE)).clicked() {
+        let (refresh, sort, preview, system, encoding) = (
+            L!("重新整理", "Refresh"),
+            L!("排序方式", "Sort by"),
+            L!("預覽窗格", "Preview pane"),
+            L!("顯示受保護的系統項目", "Show protected system items"),
+            L!("ZIP 檔名編碼", "ZIP file name encoding"),
+        );
+        let dark = ui.visuals().dark_mode;
+        let (theme_glyph, theme) = if dark { (icon::SUN, L!("淺色模式", "Light mode")) } else { (icon::MOON, L!("深色模式", "Dark mode")) };
+        let check = |on: bool| if on { icon::CHECK } else { "" };
+        ui.set_width(menu_width(ui, &[(refresh, "F5"), (sort, "›"), (preview, "Alt+P"), (system, ""), (encoding, "›"), (theme, "")]));
+        if menu_item(ui, icon::ARROWS_CLOCKWISE, refresh, "F5").clicked() {
             self.refresh();
         }
         ui.separator();
-        ui.label(RichText::new(L!("排序方式", "Sort by")).size(12.0).color(pal(ui).text2));
-        for (key, label) in [(SortKey::Name, L!("名稱", "Name")), (SortKey::Modified, L!("修改日期", "Modified")), (SortKey::Type, L!("類型", "Type")), (SortKey::Size, L!("大小", "Size"))] {
-            if ui.radio(self.sort_key == key, label).clicked() {
-                self.sort_key = key;
-                self.resort();
+        submenu_item(ui, icon::SORT_ASCENDING, sort, |ui| {
+            let keys = [(SortKey::Name, L!("名稱", "Name")), (SortKey::Modified, L!("修改日期", "Modified")), (SortKey::Type, L!("類型", "Type")), (SortKey::Size, L!("大小", "Size"))];
+            ui.set_width(menu_width(ui, &keys.map(|(_, l)| (l, ""))));
+            for (key, label) in keys {
+                if menu_item(ui, check(self.sort_key == key), label, "").clicked() {
+                    self.sort_key = key;
+                    self.resort();
+                }
             }
-        }
+        });
         ui.separator();
-        ui.checkbox(&mut self.preview_open, L!("預覽窗格\tAlt+P", "Preview pane\tAlt+P")).on_hover_text(L!("在右側預覽選取的圖片或文字檔", "Preview the selected image or text file on the right"));
-        if ui
-            .checkbox(&mut self.show_system, L!("顯示受保護的系統項目", "Show protected system items"))
-            .on_hover_text(L!("例如家目錄中的 My Documents、Application Data 等相容性連結；檔案總管預設也不顯示", "For example compatibility links such as My Documents and Application Data in your home folder; File Explorer hides them too"))
-            .changed()
-        {
+        if menu_item(ui, check(self.preview_open), preview, "Alt+P").on_hover_text(L!("在右側預覽選取的圖片或文字檔", "Preview the selected image or text file on the right")).clicked() {
+            self.preview_open = !self.preview_open;
+        }
+        let r = menu_item(ui, check(self.show_system), system, "").on_hover_text(L!(
+            "例如家目錄中的 My Documents、Application Data 等相容性連結；檔案總管預設也不顯示",
+            "For example compatibility links such as My Documents and Application Data in your home folder; File Explorer hides them too"
+        ));
+        if r.clicked() {
+            self.show_system = !self.show_system;
             self.refresh();
         }
-        ui.menu_button(L!("ZIP 檔名編碼", "ZIP file name encoding"), |ui| {
+        submenu_item(ui, icon::TEXT_AA, encoding, |ui| {
             let current = ziptool_core::zip_codepage();
             let choices = [
                 (None, L!("自動（依系統）", "Automatic (system)")),
@@ -1648,24 +1668,21 @@ impl App {
                 (Some(949), L!("韓文（EUC-KR）", "Korean (EUC-KR)")),
                 (Some(1252), L!("西歐語系（Windows-1252）", "Western European (Windows-1252)")),
             ];
+            ui.set_width(menu_width(ui, &choices.map(|(_, l)| (l, ""))));
+            // 舊式 zip（例如 Windows 內建壓縮產生的）沒有記錄檔名編碼；中文檔名出現亂碼時可在這裡切換
             for (cp, label) in choices {
-                if ui.radio(current == cp, label).clicked() {
+                if menu_item(ui, check(current == cp), label, "").clicked() {
                     ziptool_core::set_zip_codepage(cp);
                     self.refresh();
                 }
             }
-        })
-        .response
-        .on_hover_text(L!("舊式 zip（例如 Windows 內建壓縮產生的）沒有記錄檔名編碼；中文檔名出現亂碼時可在這裡切換", "Older zips (for example those made by Windows) don't record the file name encoding; switch here if names look garbled"));
+        });
         ui.separator();
-        let dark = ui.visuals().dark_mode;
-        let (glyph, label) = if dark { (icon::SUN, L!("淺色模式", "Light mode")) } else { (icon::MOON, L!("深色模式", "Dark mode")) };
-        if ui.button(format!("{glyph}  {label}")).clicked() {
+        if menu_item(ui, theme_glyph, theme, "").clicked() {
             ui.ctx().set_theme(if dark { egui::Theme::Light } else { egui::Theme::Dark });
         }
     }
 
-    /// 「⋯」選單：開啟壓縮檔、選取、檔案總管整合、關於、結束
     /// 「⋯」選單：常用的在前，較少用的「檔案總管整合」與「語言」收進子選單
     fn more_menu(&mut self, ui: &mut egui::Ui) {
         let (open, select_all, select_none, invert) = (L!("開啟壓縮檔…", "Open archive…"), L!("全選", "Select all"), L!("取消選取", "Select none"), L!("反向選取", "Invert selection"));
@@ -1820,7 +1837,10 @@ impl App {
                 let popup = if self.shot_menu { popup.open(true) } else { popup };
                 popup.show(|ui| self.more_menu(ui));
                 let view = command_button(ui, icon::SLIDERS_HORIZONTAL, Some(L!("檢視", "View"))).on_hover_text(L!("排序、顯示方式與外觀", "Sorting, display and appearance"));
-                egui::Popup::menu(&view).show(|ui| self.view_menu(ui));
+                let popup = egui::Popup::menu(&view);
+                #[cfg(debug_assertions)]
+                let popup = if self.shot_view_menu { popup.open(true) } else { popup };
+                popup.show(|ui| self.view_menu(ui));
             });
         });
         if let Some(a) = action {
@@ -3107,6 +3127,7 @@ impl App {
                     "delete" => self.cmd_delete(),
                     "about" => self.dialog = Some(Dialog::About),
                     "menu" => self.shot_menu = true,
+                    "view-menu" => self.shot_view_menu = true,
                     "update" => {
                         let asset = update::Asset { name: "zipo.zip".into(), url: String::new(), sha256: "0".repeat(64), size: 9_200_000 };
                         let page = "https://github.com/omni624562/zipo/releases".into();
@@ -4400,6 +4421,70 @@ mod drag_out_tests {
         app.navigate(Location::Dir(root.clone()));
         app.paste_files(vec![f]);
         assert!(app.dialog.is_none());
+    }
+
+    /// 「檢視」選單：點「預覽窗格」切換開關；「排序方式」子選單點「大小」改變排序
+    #[test]
+    fn view_menu_toggles_and_sorts() {
+        let t = tempfile::tempdir().unwrap();
+        let mut app = App::new(Some(real_path(t.path())));
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(1000.0, 700.0));
+        let frame = |app: &mut App, events: Vec<egui::Event>| -> Vec<(String, egui::Rect)> {
+            let mut out = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), events, ..Default::default() }, |ui| app.command_bar(ui));
+            out.textures_delta.clear();
+            out.platform_output
+                .accesskit_update
+                .unwrap()
+                .nodes
+                .iter()
+                .filter_map(|(_, n)| {
+                    let b = n.bounds()?;
+                    Some((n.label().unwrap_or_default().to_string(), egui::Rect::from_min_max(egui::pos2(b.x0 as f32, b.y0 as f32), egui::pos2(b.x1 as f32, b.y1 as f32))))
+                })
+                .collect()
+        };
+        let click = |pos: egui::Pos2| {
+            let b = |pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+            vec![egui::Event::PointerMoved(pos), b(true), b(false)]
+        };
+        let find = |nodes: &[(String, egui::Rect)], label: &str| nodes.iter().find(|(l, _)| l.contains(label)).map(|(_, r)| r.center());
+        let open_view = |app: &mut App| {
+            let nodes = frame(app, vec![]);
+            let view = find(&nodes, "檢視").expect("工具列應有「檢視」");
+            frame(app, click(view));
+            frame(app, vec![])
+        };
+        // 預覽窗格：點一下打開
+        let nodes = open_view(&mut app);
+        let preview = find(&nodes, "預覽窗格").expect("選單應已打開");
+        frame(&mut app, vec![egui::Event::PointerMoved(preview)]);
+        frame(&mut app, click(preview));
+        assert!(app.preview_open);
+        // 排序方式 › 大小
+        let nodes = open_view(&mut app);
+        let sort = find(&nodes, "排序方式").expect("選單應已打開");
+        let mut nodes = frame(&mut app, vec![egui::Event::PointerMoved(sort)]);
+        for _ in 0..5 {
+            if find(&nodes, "大小").is_some() {
+                break;
+            }
+            nodes = frame(&mut app, vec![egui::Event::PointerMoved(sort)]);
+        }
+        // 子選單第一個畫面還不知道自己的寬度，下一個畫面才放到正確位置
+        for _ in 0..3 {
+            nodes = frame(&mut app, vec![egui::Event::PointerMoved(sort)]);
+        }
+        let rect = |label: &str| nodes.iter().find(|(l, _)| l == label).map(|(_, r)| *r);
+        let (parent, sub) = (rect("排序方式").unwrap(), rect("大小").expect("子選單應已展開"));
+        // 選單靠近畫面右緣時，子選單改在左側展開，並緊貼主選單（中間不留空隙）
+        let gap = if sub.min.x >= parent.max.x { sub.min.x - parent.max.x } else { parent.min.x - sub.max.x };
+        assert!(gap.abs() < 24.0, "子選單應緊貼主選單：{parent:?} {sub:?}");
+        let size = sub.center();
+        frame(&mut app, vec![egui::Event::PointerMoved(size)]);
+        frame(&mut app, click(size));
+        assert_eq!(app.sort_key, SortKey::Size);
     }
 
     /// 「⋯」選單：滑過「語言 / Language」會展開子選單，點選其中的項目會套用（以輔助使用資訊找出項目的位置）

@@ -60,6 +60,8 @@ pub fn command_button(ui: &mut egui::Ui, glyph: &str, label: Option<&str>) -> eg
         let pos = egui::pos2(x0 + 20.0 + gap, rect.center().y - t.size().y / 2.0);
         ui.painter().galley(pos, t, fg);
     }
+    // 螢幕報讀程式讀得到按鈕名稱
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label.unwrap_or_default()));
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 

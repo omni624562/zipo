@@ -1,6 +1,6 @@
 //! 僅 debug 版：設定 `ZIPTOOL_SHOT=輸出.png` 時，自動截圖後關閉，用來檢查畫面。
 //! 選用：`ZIPTOOL_SHOT_OPEN=路徑`、`ZIPTOOL_SHOT_SELECT=選取前幾列`、
-//! `ZIPTOOL_SHOT_DIALOG=add|extract|info|about|update|updating|menu`、`ZIPTOOL_SHOT_DARK=1`、`ZIPTOOL_SHOT_LANG=en|zh`。
+//! `ZIPTOOL_SHOT_DIALOG=add|extract|info|about|update|updating|menu|view-menu`、`ZIPTOOL_SHOT_DARK=1`、`ZIPTOOL_SHOT_LANG=en|zh`。
 
 use std::path::PathBuf;
 
