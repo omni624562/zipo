@@ -653,7 +653,10 @@ impl App {
             };
         }
         app.sort_asc = get("sort_asc").is_none_or(|v| v != "0");
-        if let Some(f) = get("add_format").and_then(|f| Format::from_name(&f)) {
+        // 舊版（add_format）會把當時的預設 7z 也存下來，無法分辨是否為使用者選的：改用新的預設 zip；
+        // 新版選的格式存在 compress_format
+        let saved = get("compress_format").or_else(|| get("add_format").filter(|f| f != "7z"));
+        if let Some(f) = saved.and_then(|f| Format::from_name(&f)) {
             app.add_format = f;
         }
         if let Some(l) = get("add_level").and_then(|l| l.parse().ok()).filter(|l| *l < dialogs::LEVELS.len()) {
@@ -711,7 +714,7 @@ impl App {
         };
         storage.set_string("sort_key", key.into());
         storage.set_string("sort_asc", if self.sort_asc { "1" } else { "0" }.into());
-        storage.set_string("add_format", self.add_format.name().into());
+        storage.set_string("compress_format", self.add_format.name().into());
         storage.set_string("add_level", self.add_level.to_string());
         storage.set_string("show_system", if self.show_system { "1" } else { "0" }.into());
         storage.set_string("auto_update", if self.auto_update { "1" } else { "0" }.into());
@@ -3405,6 +3408,19 @@ mod phase3_tests {
         assert_eq!((app.add_format, app.add_level), (Format::SevenZ, 5));
         // 第一次使用：預設 zip（Windows、macOS 不必安裝軟體就能開啟，傳給別人最方便）
         assert_eq!(App::with_storage(None, Some(&MemStorage::default())).add_format, Format::Zip);
+        // 從舊版升級：舊版會把當時的預設 7z 存下來，無法分辨是否為使用者選的，改用新的預設 zip；其他格式照舊
+        let mut old = MemStorage::default();
+        eframe::Storage::set_string(&mut old, "add_format", "7z".into());
+        assert_eq!(App::with_storage(None, Some(&old)).add_format, Format::Zip);
+        eframe::Storage::set_string(&mut old, "add_format", "tar.gz".into());
+        assert_eq!(App::with_storage(None, Some(&old)).add_format, Format::TarGz);
+        // 新版之後選的 7z：照常記住
+        let mut newer = MemStorage::default();
+        let mut chosen = App::with_storage(None, Some(&old));
+        chosen.add_format = Format::SevenZ;
+        chosen.save_settings(&mut newer);
+        eframe::Storage::set_string(&mut newer, "add_format", "7z".into());
+        assert_eq!(App::with_storage(None, Some(&newer)).add_format, Format::SevenZ);
         // 選了只能放一個檔案的格式（gz）卻要壓縮多個項目：改用 zip
         let d = AddDialog::new(vec![root.join("sub"), root.join("f00.txt")], Format::Gz, 5);
         assert_eq!(d.choice().0, Format::Zip);
