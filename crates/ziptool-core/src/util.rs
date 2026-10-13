@@ -383,6 +383,13 @@ impl<'a> Planner<'a> {
                 let _ = std::fs::remove_file(&part);
                 return Err(Error::NotEnoughSpace { need: total, available: limit });
             }
+            if let Some(max) = self.opts.max_bytes
+                && total > max
+            {
+                drop(file);
+                let _ = std::fs::remove_file(&part);
+                return Err(Error::TooLarge { limit: max });
+            }
             if !self.opts.allow_high_ratio && total >= self.bomb_min && total / self.packed.max(1) >= crate::BOMB_RATIO {
                 drop(file);
                 let _ = std::fs::remove_file(&part);
@@ -685,6 +692,20 @@ mod tests {
         let r = plan.write_file("big.bin", &tmp.path().join("big.bin"), &mut data, None, None);
         assert!(matches!(r, Err(Error::NotEnoughSpace { .. })), "{r:?}");
         assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0, "不應留下任何檔案");
+    }
+
+    /// 呼叫端指定的寫入上限（預覽、拖曳）：依實際寫出的量判斷，不採信壓縮檔宣告的大小
+    #[test]
+    fn max_bytes_stops_writing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let opts = ExtractOptions { max_bytes: Some(1000), ..Default::default() };
+        let plan = Planner::new(&tmp.path().join("x.gz"), tmp.path(), &opts, &NoProgress, None);
+        let mut data = &vec![0u8; 5000][..];
+        let r = plan.write_file("big.bin", &tmp.path().join("big.bin"), &mut data, None, None);
+        assert!(matches!(r, Err(Error::TooLarge { limit: 1000 })), "{r:?}");
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0, "不應留下任何檔案");
+        let mut small = &vec![0u8; 1000][..];
+        assert!(plan.write_file("ok.bin", &tmp.path().join("ok.bin"), &mut small, None, None).is_ok());
     }
 
     /// 宣告的大小可以造假，tar／gz 等格式也沒有清單可預先檢查：解壓時要依實際寫出的量即時判斷壓縮炸彈

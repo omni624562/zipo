@@ -453,6 +453,7 @@ fn cmd_extract(a: &Args, flatten: bool) -> anyhow::Result<()> {
                 strip_prefix: String::new(),
                 flatten,
                 allow_high_ratio,
+                max_bytes: None,
             };
             ziptool_core::extract(archive, &dest, &opts, &bar)
         });

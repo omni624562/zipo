@@ -33,6 +33,8 @@ pub enum Error {
     WrongPassword,
     NotEnoughSpace { need: u64, available: u64 },
     PossibleBomb { size: u64, packed: u64 },
+    /// 超過 [`ExtractOptions::max_bytes`]
+    TooLarge { limit: u64 },
     Cancelled,
 }
 
@@ -53,6 +55,7 @@ impl std::fmt::Display for Error {
                 format_size(*need),
                 format_size(*available)
             ),
+            Error::TooLarge { limit } => F!("解出的資料超過 {} 的上限", "The extracted data exceeds the {} limit", format_size(*limit)),
             Error::PossibleBomb { size, packed } => F!(
                 "解壓縮後約 {}，是壓縮檔的 {} 倍，可能是惡意的「壓縮炸彈」",
                 "Extracts to about {}, {} times the archive size; it may be a malicious \"zip bomb\"",
@@ -139,6 +142,8 @@ pub struct ExtractOptions {
     pub flatten: bool,
     /// 允許極高壓縮比（使用者已確認不是壓縮炸彈）。
     pub allow_high_ratio: bool,
+    /// 最多寫出的位元組數（預覽、拖曳等只需要小檔案的用途）；依實際寫出的量計算，不採信壓縮檔宣告的大小
+    pub max_bytes: Option<u64>,
 }
 
 /// 除錯輸出不顯示密碼本身，避免被記錄到日誌或錯誤報告中
@@ -166,6 +171,7 @@ impl std::fmt::Debug for ExtractOptions {
             .field("strip_prefix", &self.strip_prefix)
             .field("flatten", &self.flatten)
             .field("allow_high_ratio", &self.allow_high_ratio)
+            .field("max_bytes", &self.max_bytes)
             .finish()
     }
 }

@@ -959,7 +959,14 @@ impl App {
         let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
         let dir = std::env::temp_dir().join("Zipo").join(format!("{}-drag-{stamp}", std::process::id()));
         let password = self.cache.as_ref().and_then(|c| c.password.clone());
-        let opts = ziptool_core::ExtractOptions { password, selection: Some(entries), strip_prefix: inner.clone(), ..Default::default() };
+        // 在畫面執行緒上解壓縮：宣告的大小可能造假，實際寫出超過上限就停止，改在背景處理
+        let opts = ziptool_core::ExtractOptions {
+            password,
+            selection: Some(entries),
+            strip_prefix: inner.clone(),
+            max_bytes: Some(DRAG_OUT_MAX),
+            ..Default::default()
+        };
         match ziptool_core::extract(&path, &dir, &opts, &ziptool_core::NoProgress) {
             Ok(r) if !r.issues.is_empty() => {
                 let i = &r.issues[0];
@@ -974,6 +981,11 @@ impl App {
                     file_name(&path),
                     matches!(e, Error::WrongPassword),
                 )));
+                return None;
+            }
+            Err(Error::TooLarge { .. }) => {
+                let _ = std::fs::remove_dir_all(&dir);
+                self.spawn(Task::PrepareDrag { archive: path, entries: cache_entries, strip: inner, password: opts.password });
                 return None;
             }
             Err(e) => {
@@ -2609,7 +2621,14 @@ fn is_executable(name: &str) -> bool {
 fn preview_inside(archive: &Path, entry: &str, strip: &str, password: Option<String>) -> preview::Content {
     let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     let dir = std::env::temp_dir().join("Zipo").join(format!("{}-preview-{stamp}", std::process::id()));
-    let opts = ziptool_core::ExtractOptions { password, selection: Some(vec![entry.to_string()]), strip_prefix: strip.to_string(), ..Default::default() };
+    // 宣告的大小可能造假：實際寫出超過上限就停止
+    let opts = ziptool_core::ExtractOptions {
+        password,
+        selection: Some(vec![entry.to_string()]),
+        strip_prefix: strip.to_string(),
+        max_bytes: Some(preview::MAX_ARCHIVE_PREVIEW),
+        ..Default::default()
+    };
     let content = match ziptool_core::extract(archive, &dir, &opts, &ziptool_core::NoProgress) {
         // 解出的檔名可能經過清理（例如 C:x.txt → C_x.txt），不可用項目名稱組路徑
         Ok(r) if r.issues.is_empty() => match jobs::extracted_file(&dir) {
@@ -2618,6 +2637,7 @@ fn preview_inside(archive: &Path, entry: &str, strip: &str, password: Option<Str
         },
         Ok(r) => preview::Content::Unavailable(r.issues.first().map(|i| i.reason.clone()).unwrap_or_default()),
         Err(Error::PasswordRequired | Error::WrongPassword) => preview::Content::Unavailable(L!("需要密碼才能預覽", "A password is required to preview").into()),
+        Err(Error::TooLarge { limit }) => preview::Content::Unavailable(F!("超過 {} 的檔案不預覽", "Files larger than {} are not previewed", ziptool_core::format_size(limit))),
         Err(e) => preview::Content::Unavailable(e.to_string()),
     };
     let _ = std::fs::remove_dir_all(&dir);
@@ -3814,6 +3834,36 @@ mod drag_out_tests {
         assert_eq!(std::fs::read_to_string(&items[0]).unwrap(), "A");
     }
 
+    /// 宣告的大小造假（看起來很小、實際超過上限）：寫到上限就停止，改在背景解壓縮
+    #[test]
+    fn understated_size_falls_back_to_background() {
+        let t = tempfile::tempdir().unwrap();
+        let root = real_path(t.path());
+        let ar = root.join("liar.zip");
+        let mut z = zip::ZipWriter::new(std::fs::File::create(&ar).unwrap());
+        z.start_file("big.bin", zip::write::SimpleFileOptions::default()).unwrap();
+        let block = vec![0u8; 1 << 20];
+        for _ in 0..(DRAG_OUT_MAX >> 20) + 1 {
+            std::io::Write::write_all(&mut z, &block).unwrap();
+        }
+        z.finish().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = App::new(Some(ar.clone()));
+        load(&mut app, &ctx);
+        let i = app.rows.iter().position(|r| r.name == "big.bin").unwrap();
+        app.rows[i].size = Some(1);
+        app.sel = [i].into();
+        assert!(app.prepare_drag_out(vec!["big.bin".into()]).is_none());
+        assert!(matches!(app.job.as_ref().map(|j| &j.task), Some(Task::PrepareDrag { .. })));
+        // 等背景工作結束（解出約 257 MB）
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        while app.job.is_some() && std::time::Instant::now() < deadline {
+            app.poll(&ctx);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(matches!(&app.dialog, Some(Dialog::Notice { title, .. }) if title == "已準備好拖曳"));
+    }
+
     /// 同樣的項目不重複解壓縮；壓縮檔改變後重新解壓縮
     #[test]
     fn drag_cache_reuses_until_archive_changes() {
@@ -4133,6 +4183,17 @@ mod preview_tests {
         z.finish().unwrap();
         assert!(matches!(preview_inside(&odd, "C:x.txt", "", None), preview::Content::Text { text, .. } if text == "壓縮檔內的內容"));
 
+        // 宣告的大小造假（實際超過預覽上限）：寫到上限就停止，不會解出整個檔案
+        let liar = root.join("liar.zip");
+        let mut z = zip::ZipWriter::new(std::fs::File::create(&liar).unwrap());
+        z.start_file("big.txt", zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored)).unwrap();
+        let block = vec![b'a'; 1 << 20];
+        for _ in 0..(preview::MAX_ARCHIVE_PREVIEW >> 20) + 1 {
+            std::io::Write::write_all(&mut z, &block).unwrap();
+        }
+        z.finish().unwrap();
+        assert!(matches!(preview_inside(&liar, "big.txt", "", None), preview::Content::Unavailable(m) if m.contains("不預覽")));
+
         // 沒有選取或選取多個：不預覽
         app.sel = [0, 1].into();
         app.update_preview(&ctx);
@@ -4301,6 +4362,7 @@ mod english_tests {
                 ziptool_core::Error::Cancelled,
                 ziptool_core::Error::NotEnoughSpace { need: 10, available: 1 },
                 ziptool_core::Error::PossibleBomb { size: 1 << 31, packed: 1 },
+                ziptool_core::Error::TooLarge { limit: 1 << 20 },
                 ziptool_core::Error::SevenZ("x".into()),
             ] {
                 assert!(!has_chinese(&e.to_string()), "{e}");
