@@ -2304,7 +2304,9 @@ impl App {
         let Some(mut dialog) = self.dialog.take() else { return };
         let mut keep = true;
         let modal = egui::Modal::new(egui::Id::new("dialog")).frame(dialog_frame(ctx));
-        let resp = modal.show(ctx, |ui| match &mut dialog {
+        // 視窗太小、放不下整個對話框時可以捲動（Enter／Esc 一直有效）
+        let max_h = (ctx.content_rect().height() - 96.0).max(200.0);
+        let resp = modal.show(ctx, |ui| egui::ScrollArea::vertical().max_height(max_h).min_scrolled_height(max_h).show(ui, |ui| match &mut dialog {
             Dialog::Add(d) => match d.ui(ui) {
                 Outcome::Pending => {}
                 Outcome::Cancel => keep = false,
@@ -2592,7 +2594,7 @@ This version must be updated manually from the download page.", env!("CARGO_PKG_
                 // 更新完成或失敗時由 poll_update 換成其他對話框
                 keep = true;
             }
-        });
+        }));
         // 進行中的對話框不因點擊背景而關閉，避免誤觸
         let _ = resp.should_close();
         if keep && self.dialog.is_none() {
