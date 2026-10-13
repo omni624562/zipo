@@ -348,25 +348,31 @@ impl ExtractDialog {
                 .on_hover_text(L!("全部項目都順利解出才會移除；可以從資源回收筒還原", "Removed only if every item was extracted; it can be restored from the Recycle Bin"));
         }
         ui.checkbox(&mut self.open_folder, L!("完成後開啟資料夾", "Open the folder when done"));
-        ui.add_space(10.0);
+        ui.add_space(6.0);
 
-        ui.columns(2, |cols| {
-            let ui = &mut cols[0];
-            ui.label(RichText::new(L!("路徑模式", "Paths")).strong().color(p.text));
-            ui.radio_value(&mut self.flatten, false, L!("完整路徑", "Full paths"));
-            ui.radio_value(&mut self.flatten, true, L!("不含路徑", "No paths"));
-            ui.add_space(6.0);
-            ui.label(RichText::new(L!("密碼", "Password")).strong().color(p.text));
-            password_field(ui, &mut self.password, self.show_password, L!("未加密可留白", "Leave blank if not encrypted"));
-            ui.checkbox(&mut self.show_password, L!("顯示密碼", "Show password"));
+        field_label(ui, L!("密碼（未加密可留白）", "Password (leave blank if not encrypted)"));
+        password_field(ui, &mut self.password, self.show_password, "");
+        ui.checkbox(&mut self.show_password, L!("顯示密碼", "Show password"));
+        ui.add_space(4.0);
 
-            let ui = &mut cols[1];
-            ui.label(RichText::new(L!("覆寫模式", "Overwrite")).strong().color(p.text));
-            ui.radio_value(&mut self.overwrite, Overwrite::Ask, L!("每次詢問", "Ask each time"));
-            ui.radio_value(&mut self.overwrite, Overwrite::Overwrite, L!("直接覆寫", "Overwrite"));
-            ui.radio_value(&mut self.overwrite, Overwrite::Skip, L!("略過已存在的檔案", "Skip existing files"));
-            ui.radio_value(&mut self.overwrite, Overwrite::Rename, L!("自動重新命名", "Auto rename"));
-        });
+        // 少用的選項收起來（展開與否會記住）
+        egui::CollapsingHeader::new(RichText::new(L!("更多選項", "More options")).color(p.text))
+            .id_salt("extract_more")
+            .show(ui, |ui| {
+                ui.columns(2, |cols| {
+                    let ui = &mut cols[0];
+                    ui.label(RichText::new(L!("資料夾結構", "Folders")).strong().color(p.text));
+                    ui.radio_value(&mut self.flatten, false, L!("保留資料夾結構", "Keep the folder structure"));
+                    ui.radio_value(&mut self.flatten, true, L!("所有檔案放在同一層", "Put all files in one folder"));
+
+                    let ui = &mut cols[1];
+                    ui.label(RichText::new(L!("目的地已有同名檔案時", "If a file already exists")).strong().color(p.text));
+                    ui.radio_value(&mut self.overwrite, Overwrite::Ask, L!("每次詢問", "Ask each time"));
+                    ui.radio_value(&mut self.overwrite, Overwrite::Overwrite, L!("取代", "Replace it"));
+                    ui.radio_value(&mut self.overwrite, Overwrite::Skip, L!("略過，保留原有的檔案", "Skip and keep the existing file"));
+                    ui.radio_value(&mut self.overwrite, Overwrite::Rename, L!("兩者都保留（新檔自動改名）", "Keep both (rename the new file)"));
+                });
+            });
 
         if let Some(e) = &self.error {
             error_text(ui, e);
