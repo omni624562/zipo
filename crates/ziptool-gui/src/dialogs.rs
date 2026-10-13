@@ -238,7 +238,7 @@ impl AddDialog {
         if let Some(e) = &self.error {
             error_text(ui, e);
         }
-        let (ok, cancel) = dialog_buttons(ui, L!("確定", "OK"));
+        let (ok, cancel) = dialog_buttons(ui, L!("壓縮", "Compress"));
         if cancel {
             return Outcome::Cancel;
         }
@@ -371,7 +371,7 @@ impl ExtractDialog {
         if let Some(e) = &self.error {
             error_text(ui, e);
         }
-        let (ok, cancel) = dialog_buttons(ui, L!("確定", "OK"));
+        let (ok, cancel) = dialog_buttons(ui, L!("解壓縮", "Extract"));
         if cancel {
             return Outcome::Cancel;
         }
