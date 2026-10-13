@@ -506,13 +506,13 @@ mod open_inside_tests {
 }
 
 #[cfg(not(test))]
-fn send_to_recycle_bin(paths: &[PathBuf]) -> std::io::Result<()> {
+pub(crate) fn send_to_recycle_bin(paths: &[PathBuf]) -> std::io::Result<()> {
     recycle(paths)
 }
 
 /// 測試時不動到真正的資源回收筒：改名為「原名.recycled」表示已移除
 #[cfg(test)]
-fn send_to_recycle_bin(paths: &[PathBuf]) -> std::io::Result<()> {
+pub(crate) fn send_to_recycle_bin(paths: &[PathBuf]) -> std::io::Result<()> {
     for p in paths {
         let mut name = p.file_name().unwrap_or_default().to_os_string();
         name.push(".recycled");

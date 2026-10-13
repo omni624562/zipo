@@ -1182,8 +1182,11 @@ impl App {
     }
 
     fn cmd_delete(&mut self) {
-        let Location::Archive { path, .. } = self.loc.clone() else {
-            return self.notice(L!("刪除", "Delete"), L!("刪除只能用在壓縮檔內的項目。Zipo 不會刪除你電腦上的檔案。", "Delete only works on items inside an archive. Zipo never deletes files on your computer."));
+        let path = match self.loc.clone() {
+            Location::Archive { path, .. } => path,
+            Location::Dir(_) => return self.recycle_selected(),
+            // 磁碟機不能刪除
+            Location::Computer => return,
         };
         if let Some(why) = self.read_only_reason() {
             return self.notice(L!("刪除", "Delete"), why);
@@ -1203,6 +1206,26 @@ impl App {
         let password = self.cache.as_ref().and_then(|c| c.password.clone());
         let task = Task::Update { archive: path, add: Vec::new(), into: String::new(), remove, password };
         self.dialog = Some(Dialog::ConfirmUpdate { task, title: L!("從壓縮檔刪除", "Delete from archive").into(), message, danger: true });
+    }
+
+    /// 資料夾中的刪除：與檔案總管相同，移到資源回收筒（可以還原，所以不另外確認）；
+    /// 無法回收的位置（網路磁碟等）由 Windows 先警告
+    fn recycle_selected(&mut self) {
+        let paths: Vec<PathBuf> = self.selected_rows().iter().filter(|r| !r.is_drive).filter_map(|r| self.row_path(r)).collect();
+        if paths.is_empty() {
+            return self.notice(L!("刪除", "Delete"), L!("請先選取要刪除的檔案或資料夾。", "Select the files or folders to delete first."));
+        }
+        match jobs::send_to_recycle_bin(&paths) {
+            Ok(()) => {
+                self.sel.clear();
+                self.refresh();
+            }
+            Err(e) => {
+                // 有些項目可能已經移走（例如使用者在警告中選擇不刪除）：重新整理以反映實際狀態
+                self.refresh();
+                self.notice(L!("無法移到資源回收筒", "Cannot move to the Recycle Bin"), F!("{}\n\n檔案可能正在使用中；請關閉使用它的程式後再試。", "{}\n\nThe file may be in use; close the program using it and try again.", ziptool_core::describe(&e)));
+            }
+        }
     }
 
     fn cmd_extract(&mut self) {
@@ -1804,7 +1827,8 @@ impl App {
             extract: in_archive || has_archive,
             test: in_archive || has_archive,
             info: has_sel || in_archive,
-            delete: in_archive && has_sel && !nested,
+            // 壓縮檔內：從壓縮檔刪除；資料夾中：移到資源回收筒（磁碟機除外）
+            delete: if in_archive { has_sel && !nested } else { selectable },
         }
     }
 
@@ -1831,10 +1855,12 @@ impl App {
             button(ui, st.test, icon::SEAL_CHECK, L!("測試", "Test"), L!("測試壓縮檔是否完整、沒有損壞", "Test whether the archive is intact"), L!("選取的項目中沒有壓縮檔", "No archive is selected"), Action::Test);
             separator_v(ui);
             button(ui, st.info, icon::INFO, L!("內容", "Properties"), L!("顯示選取項目的詳細資訊", "Show details of the selected items"), L!("先選取項目", "Select an item first"), Action::Info);
-            // 刪除只用在壓縮檔內的項目；在一般資料夾不顯示，避免誤以為會刪除電腦上的檔案
-            if st.in_archive {
-                button(ui, st.delete, icon::TRASH, L!("刪除", "Delete"), L!("從壓縮檔刪除選取的項目（Delete）", "Delete the selected items from the archive (Delete)"), L!("先選取要刪除的項目", "Select items to delete first"), Action::Delete);
-            }
+            let delete_tip = if st.in_archive {
+                L!("從壓縮檔刪除選取的項目（Delete）", "Delete the selected items from the archive (Delete)")
+            } else {
+                L!("把選取的項目移到資源回收筒（Delete），可以從資源回收筒還原", "Move the selected items to the Recycle Bin (Delete); they can be restored from there")
+            };
+            button(ui, st.delete, icon::TRASH, L!("刪除", "Delete"), delete_tip, L!("先選取要刪除的項目", "Select items to delete first"), Action::Delete);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let more = command_button(ui, icon::DOTS_THREE, None).on_hover_text(L!("更多", "More"));
                 let popup = egui::Popup::menu(&more);
@@ -2192,6 +2218,9 @@ impl App {
                         if in_archive && !nested && ui.button(F!("{}  從壓縮檔刪除", "{}  Delete from archive", icon::TRASH)).clicked() {
                             ctx_action = Some(Action::Delete);
                         }
+                        if !in_archive && !r.is_drive && ui.button(F!("{}  刪除", "{}  Delete", icon::TRASH)).on_hover_text(L!("移到資源回收筒，可以還原", "Move to the Recycle Bin; it can be restored")).clicked() {
+                            ctx_action = Some(Action::Delete);
+                        }
                         if !r.is_drive && ui.button(F!("{}  計算雜湊值", "{}  Calculate hashes", icon::FINGERPRINT)).clicked() {
                             ctx_action = Some(Action::Hash);
                         }
@@ -2323,7 +2352,7 @@ impl App {
             self.addr_editing = true;
             return;
         }
-        if ctx.input(|i| i.key_pressed(Key::Delete)) && matches!(self.loc, Location::Archive { .. }) && !self.sel.is_empty() {
+        if ctx.input(|i| i.key_pressed(Key::Delete)) && !matches!(self.loc, Location::Computer) && !self.sel.is_empty() {
             return self.cmd_delete();
         }
         if ctx.input(|i| i.modifiers.alt && i.key_pressed(Key::P)) {
@@ -3823,14 +3852,37 @@ mod update_tests {
     }
 
     #[test]
-    fn delete_outside_archive_never_touches_disk() {
+    fn delete_outside_archive_moves_to_recycle_bin() {
         let t = tempfile::tempdir().unwrap();
-        std::fs::write(t.path().join("keep.txt"), "x").unwrap();
-        let mut app = App::new(Some(t.path().to_path_buf()));
+        let root = real_path(t.path());
+        std::fs::write(root.join("a.txt"), "x").unwrap();
+        std::fs::create_dir(root.join("資料夾")).unwrap();
+        std::fs::write(root.join("資料夾/b.txt"), "y").unwrap();
+        std::fs::write(root.join("留下.txt"), "z").unwrap();
+        let mut app = App::new(Some(root.clone()));
+        app.sel = app.rows.iter().enumerate().filter(|(_, r)| r.name == "a.txt" || r.name == "資料夾").map(|(i, _)| i).collect();
+        // 與檔案總管相同：Delete 鍵移到資源回收筒（可以還原，所以不另外確認）
+        let ctx = egui::Context::default();
+        let ev = egui::Event::Key { key: Key::Delete, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE };
+        let mut out = ctx.run_ui(egui::RawInput { events: vec![ev], ..Default::default() }, |ui| app.keyboard(ui.ctx()));
+        out.textures_delta.clear();
+        assert!(app.dialog.is_none(), "{:?}", app.dialog.as_ref().map(|_| ()));
+        // 測試時的資源回收筒以改名代替：沒有被永久刪除
+        assert!(!root.join("a.txt").exists() && root.join("a.txt.recycled").exists());
+        assert!(!root.join("資料夾").exists() && root.join("資料夾.recycled/b.txt").exists());
+        assert!(root.join("留下.txt").exists(), "沒有選取的不受影響");
+        assert!(app.rows.iter().all(|r| r.name != "a.txt" && r.name != "資料夾"), "清單已更新");
+        assert!(app.sel.is_empty());
+        assert!(!app.toolbar_state().delete, "沒有選取時不能刪除");
         app.sel = [0].into();
+        assert!(app.toolbar_state().delete, "選取後工具列可以刪除");
+
+        // 磁碟機不能刪除
+        let mut app = App::new(None);
+        app.navigate(Location::Computer);
+        app.sel = [0].into();
+        assert!(!app.toolbar_state().delete);
         app.cmd_delete();
-        assert!(matches!(app.dialog, Some(Dialog::Notice { .. })));
-        assert!(t.path().join("keep.txt").exists());
     }
 }
 
