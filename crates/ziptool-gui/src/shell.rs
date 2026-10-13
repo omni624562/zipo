@@ -185,6 +185,7 @@ fn notify_assoc_changed() {
 /// 在檔案總管選取多個檔案執行「加入壓縮檔」時，Windows 會每個檔案各啟動一個 Zipo。
 /// 第一個啟動的負責收集，其他的把路徑交給它後結束，最後只開一個對話框、包含全部檔案。
 /// 回傳 `None` 代表路徑已交給另一個 Zipo，這個應直接結束。
+#[cfg(windows)]
 pub fn collect_add(paths: Vec<PathBuf>) -> Option<Vec<PathBuf>> {
     let queue = std::env::temp_dir().join("Zipo").join("add-queue");
     collect_add_in(&queue, r"Local\Zipo.AddCollector", paths, std::time::Duration::from_millis(400))
@@ -284,12 +285,6 @@ pub fn collect_add_in(queue: &Path, mutex: &str, paths: Vec<PathBuf>, quiet: std
 
 #[cfg(not(windows))]
 pub fn collect_add(paths: Vec<PathBuf>) -> Option<Vec<PathBuf>> {
-    Some(paths)
-}
-
-#[cfg(not(windows))]
-#[cfg_attr(test, allow(dead_code))]
-pub fn collect_add_in(_queue: &Path, _mutex: &str, paths: Vec<PathBuf>, _quiet: std::time::Duration) -> Option<Vec<PathBuf>> {
     Some(paths)
 }
 
