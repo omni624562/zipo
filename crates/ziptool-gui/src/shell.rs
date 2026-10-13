@@ -12,8 +12,8 @@ use std::path::Path;
 /// 實際使用的位置；測試時改用其他機碼，不影響真實設定。
 pub const ROOT: &str = r"Software\Classes";
 
-/// 右鍵選單要出現的壓縮檔副檔名
-pub const ARCHIVE_EXTS: [&str; 11] = [".zip", ".7z", ".tar", ".gz", ".tgz", ".bz2", ".tbz2", ".xz", ".txz", ".zst", ".tzst"];
+/// 右鍵選單要出現的壓縮檔副檔名；.001 是分割壓縮檔的第一個（例如 a.zip.001）
+pub const ARCHIVE_EXTS: [&str; 12] = [".zip", ".7z", ".tar", ".gz", ".tgz", ".bz2", ".tbz2", ".xz", ".txz", ".zst", ".tzst", ".001"];
 
 /// （機碼路徑, 顯示文字, 命令列參數）
 fn verbs(exe: &Path) -> Vec<(String, &'static str, String)> {
@@ -66,6 +66,28 @@ pub fn is_installed(root: &str) -> bool {
     use winreg::enums::HKEY_CURRENT_USER;
     RegKey::predef(HKEY_CURRENT_USER).open_subkey(format!(r"{root}\*\shell\ZipTool.Add")).is_ok()
 }
+
+/// 啟動時呼叫：已加入右鍵選單或已註冊預設程式，但缺少新版才有的項目（例如 .001）時補上；
+/// 使用者沒有啟用的不會自行加上
+#[cfg(windows)]
+pub fn refresh(root: &str, base: &str, exe: &Path) {
+    use winreg::RegKey;
+    use winreg::enums::HKEY_CURRENT_USER;
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    if is_installed(root) && verbs(exe).iter().any(|(key, _, _)| hkcu.open_subkey(format!(r"{root}\{key}\command")).is_err()) {
+        let _ = install(root, exe);
+    }
+    let missing = |ext: &str| {
+        hkcu.open_subkey(format!(r"{base}\Classes\{ext}\OpenWithProgids")).and_then(|k| k.get_raw_value(PROG_ID)).is_err()
+            || hkcu.open_subkey(format!(r"{base}\{APP_NAME}\Capabilities\FileAssociations")).and_then(|k| k.get_raw_value(ext)).is_err()
+    };
+    if is_default_registered(base) && ARCHIVE_EXTS.iter().any(|ext| missing(ext)) {
+        let _ = register_default(base, exe);
+    }
+}
+
+#[cfg(not(windows))]
+pub fn refresh(_root: &str, _base: &str, _exe: &Path) {}
 
 /// 預設程式註冊用的 ProgID 與「已註冊的應用程式」名稱
 pub const PROG_ID: &str = "ZipTool.Archive";
@@ -219,6 +241,36 @@ mod tests {
         // 再移除一次也不出錯
         uninstall(&root).unwrap();
         hkcu.delete_subkey_all(&root).unwrap();
+    }
+
+    /// 分割壓縮檔的第一個（.001）也有右鍵選單與「開啟方式」；舊版只註冊了部分副檔名時，啟動時會補上
+    #[test]
+    fn split_volumes_are_registered_and_refreshed() {
+        let root = format!(r"Software\ZipToolSplitTest-{}", std::process::id());
+        let base = format!(r"Software\ZipToolSplitDefaultTest-{}", std::process::id());
+        let exe = Path::new(r"C:\Program Files\Zipo\zipo-gui.exe");
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        install(&root, exe).unwrap();
+        register_default(&base, exe).unwrap();
+        let cmd: String = hkcu.open_subkey(format!(r"{root}\SystemFileAssociations\.001\shell\ZipTool.ExtractHere\command")).unwrap().get_value("").unwrap();
+        assert_eq!(cmd, r#""C:\Program Files\Zipo\zipo-gui.exe" --extract-here "%1""#);
+        assert!(hkcu.open_subkey(format!(r"{base}\Classes\.001\OpenWithProgids")).unwrap().get_raw_value(PROG_ID).is_ok());
+
+        // 模擬舊版的註冊（少了 .001）：啟動時補上
+        hkcu.delete_subkey_all(format!(r"{root}\SystemFileAssociations\.001")).unwrap();
+        hkcu.delete_subkey_all(format!(r"{base}\Classes\.001")).unwrap();
+        refresh(&root, &base, exe);
+        assert!(hkcu.open_subkey(format!(r"{root}\SystemFileAssociations\.001\shell\ZipTool.Open")).is_ok());
+        assert!(hkcu.open_subkey(format!(r"{base}\Classes\.001\OpenWithProgids")).unwrap().get_raw_value(PROG_ID).is_ok());
+
+        // 沒有註冊過的不會自行加上
+        uninstall(&root).unwrap();
+        unregister_default(&base).unwrap();
+        refresh(&root, &base, exe);
+        assert!(!is_installed(&root));
+        assert!(!is_default_registered(&base));
+        let _ = hkcu.delete_subkey_all(&root);
+        let _ = hkcu.delete_subkey_all(&base);
     }
 
     /// 預設程式註冊同樣寫到測試機碼，驗證後整個刪除。

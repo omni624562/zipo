@@ -141,6 +141,10 @@ fn run_app() -> eframe::Result {
             };
             let mut app = App::with_storage(open, cc.storage);
             ziptool_core::i18n::set_english(app.language.english());
+            // 舊版註冊的右鍵選單或預設程式缺少新的副檔名時補上
+            if let Ok(exe) = std::env::current_exe() {
+                shell::refresh(shell::ROOT, shell::SOFTWARE, &exe);
+            }
             app.apply_start(start);
             if let Ok(exe) = std::env::current_exe() {
                 update::cleanup_old(&exe);
@@ -3482,6 +3486,39 @@ mod start_tests {
         }
         assert_eq!(std::fs::read_to_string(&src).unwrap(), "內容");
         assert!(matches!(app.dialog, Some(Dialog::Notice { ok: true, .. })));
+    }
+
+    /// 右鍵選單對分割壓縮檔的第一個（.001）「解壓縮到這裡」「解壓縮到資料夾」
+    #[test]
+    fn extract_split_volumes_from_context_menu() {
+        let t = tempfile::tempdir().unwrap();
+        let root = real_path(t.path());
+        let src = root.join("doc");
+        std::fs::create_dir(&src).unwrap();
+        let data: Vec<u8> = (0..300_000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8).collect();
+        std::fs::write(src.join("big.bin"), &data).unwrap();
+        let ar = root.join("20261013.zip");
+        let opts = ziptool_core::CompressOptions { level: Some(0), volume_size: Some(100_000), ..Default::default() };
+        ziptool_core::compress(std::slice::from_ref(&src), &ar, Format::Zip, &opts, &ziptool_core::NoProgress).unwrap();
+        std::fs::remove_dir_all(&src).unwrap();
+        let first = root.join("20261013.zip.001");
+        assert!(root.join("20261013.zip.004").is_file(), "應分割成四個檔案");
+
+        let ctx = egui::Context::default();
+        let mut app = App::new(None);
+        app.apply_start(StartAction::ExtractHere(first.clone()));
+        for _ in 0..400 {
+            app.poll(&ctx);
+            if app.job.is_none() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(matches!(app.dialog, Some(Dialog::Notice { ok: true, .. })), "{:?}", app.dialog.as_ref().map(|_| ()));
+        assert_eq!(std::fs::read(src.join("big.bin")).unwrap(), data);
+
+        // 解壓縮到資料夾：預設資料夾名稱去掉 .zip.001
+        assert_eq!(dialogs::default_dest(&first), root.join("20261013"));
     }
 }
 
