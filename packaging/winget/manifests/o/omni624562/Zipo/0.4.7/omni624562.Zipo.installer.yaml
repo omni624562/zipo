@@ -1,18 +1,18 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.10.0.schema.json
 
 PackageIdentifier: omni624562.Zipo
-PackageVersion: 0.4.6
+PackageVersion: 0.4.7
 InstallerType: zip
 NestedInstallerType: portable
 NestedInstallerFiles:
-  - RelativeFilePath: zipo-0.4.6-windows-x64\zipo-gui.exe
+  - RelativeFilePath: zipo-0.4.7-windows-x64\zipo-gui.exe
     PortableCommandAlias: zipo-gui
-  - RelativeFilePath: zipo-0.4.6-windows-x64\zipo.exe
+  - RelativeFilePath: zipo-0.4.7-windows-x64\zipo.exe
     PortableCommandAlias: zipo
 ReleaseDate: 2026-10-13
 Installers:
   - Architecture: x64
-    InstallerUrl: https://github.com/omni624562/zipo/releases/download/v0.4.6/zipo-0.4.6-windows-x64.zip
-    InstallerSha256: 03E92A2B68E9AB834880BA45AA88CCF4E75CF26291C5A3B505619F3C2F0D4D60
+    InstallerUrl: https://github.com/omni624562/zipo/releases/download/v0.4.7/zipo-0.4.7-windows-x64.zip
+    InstallerSha256: 8E46CBEB608F9821757D24946BFDE813619CF8B0C05229574DE0201D91CB6CC8
 ManifestType: installer
 ManifestVersion: 1.10.0
