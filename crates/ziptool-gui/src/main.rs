@@ -2710,13 +2710,43 @@ fn unix_now() -> u64 {
 /// `only_mine` 為真時刪除本程序建立的；否則刪除超過一天的舊資料夾（上次異常結束留下的）。
 /// 檔案仍被其他程式開著時刪除會失敗，直接略過。
 fn cleanup_temp(only_mine: bool) {
-    let base = std::env::temp_dir().join("Zipo");
-    let Ok(dir) = std::fs::read_dir(&base) else { return };
+    cleanup_temp_in(&std::env::temp_dir().join("Zipo"), only_mine);
+}
+
+/// 行程是否仍在執行
+#[cfg(windows)]
+fn process_running(pid: u32) -> bool {
+    use windows::Win32::Foundation::{CloseHandle, E_ACCESSDENIED, WAIT_TIMEOUT};
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject};
+    // SAFETY: 只查詢狀態，取得的控制代碼用完即關閉
+    unsafe {
+        match OpenProcess(PROCESS_SYNCHRONIZE, false, pid) {
+            Ok(h) => {
+                let running = WaitForSingleObject(h, 0) == WAIT_TIMEOUT;
+                let _ = CloseHandle(h);
+                running
+            }
+            // 存在但沒有權限開啟（例如以系統管理員身分執行）
+            Err(e) => e.code() == E_ACCESSDENIED,
+        }
+    }
+}
+
+/// 其他平台無法簡單判斷，依時間清理
+#[cfg(not(windows))]
+fn process_running(_pid: u32) -> bool {
+    false
+}
+
+fn cleanup_temp_in(base: &Path, only_mine: bool) {
+    let Ok(dir) = std::fs::read_dir(base) else { return };
     let prefix = format!("{}-", std::process::id());
     for e in dir.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
         let old = e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|d| d > Duration::from_secs(86_400));
-        if (only_mine && name.starts_with(&prefix)) || (!only_mine && old) {
+        // 名稱開頭是建立它的行程編號（核心接回分割檔的是 zipo-join-編號）；該行程仍在執行就保留
+        let owner = name.strip_prefix("zipo-join-").unwrap_or(&name).split('-').next().and_then(|p| p.parse::<u32>().ok());
+        if (only_mine && name.starts_with(&prefix)) || (!only_mine && old && !owner.is_some_and(process_running)) {
             let _ = std::fs::remove_dir_all(e.path());
         }
     }
@@ -3563,6 +3593,40 @@ mod start_tests {
 
         // 解壓縮到資料夾：預設資料夾名稱去掉 .zip.001
         assert_eq!(dialogs::default_dest(&first), root.join("20261013"));
+    }
+}
+
+/// 啟動時的清理：超過一天的暫存資料夾，若建立它的 Zipo 仍在執行（例如開著等待存回）就保留
+#[cfg(all(test, windows))]
+mod cleanup_tests {
+    use super::*;
+
+    #[test]
+    fn keeps_folders_of_running_instances() {
+        let t = tempfile::tempdir().unwrap();
+        let base = t.path();
+        let mut done = std::process::Command::new("cmd").args(["/C", "exit"]).spawn().unwrap();
+        let dead = done.id();
+        done.wait().unwrap();
+        let alive = std::process::id();
+        let make = |name: &str| {
+            let d = base.join(name);
+            std::fs::create_dir(&d).unwrap();
+            std::fs::write(d.join("f.txt"), "x").unwrap();
+            let old = SystemTime::now() - Duration::from_secs(3 * 86_400);
+            // 資料夾要用 FILE_FLAG_BACKUP_SEMANTICS 才能開啟
+            let f = std::os::windows::fs::OpenOptionsExt::custom_flags(std::fs::OpenOptions::new().write(true), 0x0200_0000).open(&d).unwrap();
+            f.set_modified(old).unwrap();
+            d
+        };
+        let running = make(&format!("{alive}-preview-1"));
+        let running_join = make(&format!("zipo-join-{alive}-2"));
+        let gone = make(&format!("{dead}-drag-3"));
+        let gone_join = make(&format!("zipo-join-{dead}-4"));
+        let other = make("unknown");
+        cleanup_temp_in(base, false);
+        assert!(running.exists() && running_join.exists(), "執行中的 Zipo 的暫存資料夾不可刪除");
+        assert!(!gone.exists() && !gone_join.exists() && !other.exists());
     }
 }
 
