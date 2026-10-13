@@ -550,6 +550,9 @@ struct App {
     cursor: Option<usize>,
     /// 視窗標題目前對應的位置
     titled: Option<Location>,
+    /// 測試用：選擇資料夾視窗的結果（不跳出真正的視窗）
+    #[cfg(test)]
+    pick_folder_for_test: Option<PathBuf>,
     /// 直接打字跳到檔案
     typeahead: String,
     typeahead_at: std::time::Instant,
@@ -623,6 +626,8 @@ impl App {
             addr_editing: false,
             cursor: None,
             titled: None,
+            #[cfg(test)]
+            pick_folder_for_test: None,
             typeahead: String::new(),
             typeahead_at: std::time::Instant::now(),
             add_format: Format::Zip,
@@ -1904,6 +1909,24 @@ impl App {
     }
 
     /// 網址列：上一頁／下一頁／上一層（32×32），分段式路徑（點空白處可直接輸入），右側搜尋框。
+    /// 選擇資料夾的視窗，從目前所在的資料夾開始
+    fn pick_folder(&mut self) -> Option<PathBuf> {
+        #[cfg(test)]
+        if let Some(p) = self.pick_folder_for_test.take() {
+            return Some(p);
+        }
+        let start = match &self.loc {
+            Location::Dir(d) => Some(d.clone()),
+            Location::Archive { path, .. } => path.parent().map(Path::to_path_buf),
+            Location::Computer => None,
+        };
+        let mut dialog = rfd::FileDialog::new().set_title(L!("選擇資料夾", "Choose a folder"));
+        if let Some(d) = start {
+            dialog = dialog.set_directory(d);
+        }
+        dialog.pick_folder()
+    }
+
     fn address_bar(&mut self, ui: &mut egui::Ui) {
         let p = pal(ui);
         let crumbs = self.breadcrumbs();
@@ -1937,6 +1960,15 @@ impl App {
                         filter_changed = r.changed();
                     });
                 });
+                ui.add_space(4.0);
+                // 選擇資料夾：開啟 Windows 的選擇資料夾視窗，選好就切換過去
+                let pick = icon_button(ui, icon::FOLDER_OPEN).on_hover_text(L!("選擇資料夾…", "Choose a folder…"));
+                pick.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, L!("選擇資料夾…", "Choose a folder…")));
+                if pick.clicked()
+                    && let Some(d) = self.pick_folder()
+                {
+                    go_to = Some(Location::Dir(d));
+                }
                 ui.add_space(4.0);
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                     let lead = match self.loc {
@@ -4532,6 +4564,33 @@ mod drag_out_tests {
         frame(&mut app, vec![egui::Event::PointerMoved(zh)]);
         frame(&mut app, click(zh));
         assert_eq!(app.language, Language::Chinese);
+    }
+
+    /// 網址列旁有「選擇資料夾」按鈕，點了開啟選擇資料夾的視窗，選好的資料夾會切換過去
+    #[test]
+    fn address_bar_has_folder_picker() {
+        let t = tempfile::tempdir().unwrap();
+        let root = real_path(t.path());
+        std::fs::create_dir(root.join("目標")).unwrap();
+        let mut app = App::new(Some(root.clone()));
+        // 測試不跳出真正的視窗：選擇結果由這裡提供
+        app.pick_folder_for_test = Some(root.join("目標"));
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(1000.0, 100.0));
+        let frame = |app: &mut App, events: Vec<egui::Event>| -> Option<egui::Pos2> {
+            let mut out = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), events, ..Default::default() }, |ui| app.address_bar(ui));
+            out.textures_delta.clear();
+            out.platform_output.accesskit_update.unwrap().nodes.iter().find(|(_, n)| n.label().is_some_and(|l| l.contains("選擇資料夾"))).and_then(|(_, n)| {
+                let b = n.bounds()?;
+                Some(egui::pos2(((b.x0 + b.x1) / 2.0) as f32, ((b.y0 + b.y1) / 2.0) as f32))
+            })
+        };
+        let at = frame(&mut app, vec![]).expect("網址列旁應有「選擇資料夾」按鈕");
+        let b = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        frame(&mut app, vec![egui::Event::PointerMoved(at), b(true)]);
+        frame(&mut app, vec![egui::Event::PointerMoved(at), b(false)]);
+        assert_eq!(app.loc, Location::Dir(root.join("目標")));
     }
 
     #[test]
