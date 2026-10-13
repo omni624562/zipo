@@ -1061,6 +1061,14 @@ fn split_plain_file_is_joined_back() {
     assert_eq!(r.files, 1);
     assert_eq!(fs::read(out.join("影片.mkv")).unwrap(), data);
     assert_eq!(test(&first, None, &NoProgress).unwrap().files, 1);
+    // 列出時也可以取消（接合大型分割檔期間）
+    struct Cancel;
+    impl Progress for Cancel {
+        fn is_cancelled(&self) -> bool {
+            true
+        }
+    }
+    assert!(matches!(ziptool_core::list_with_progress(&first, None, &Cancel), Err(Error::Cancelled)));
     // 不是分割檔的未知格式：照常回報無法辨識
     fs::write(tmp.path().join("x.mkv"), &data[..1000]).unwrap();
     assert!(matches!(list(&tmp.path().join("x.mkv"), None), Err(Error::UnknownFormat(_))));

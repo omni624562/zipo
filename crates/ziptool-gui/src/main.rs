@@ -445,6 +445,26 @@ struct Loading {
     handle: JoinHandle<Result<Vec<Entry>, Error>>,
     /// 由上一頁／下一頁觸發的讀取，完成時不要再記入瀏覽紀錄
     from_history: bool,
+    /// 放棄這次讀取時（Loading 被丟棄）通知背景工作（例如接合大型分割檔）立即停止
+    _cancel: CancelOnDrop,
+}
+
+/// 被丟棄時設定取消旗標
+struct CancelOnDrop(Arc<AtomicBool>);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
+/// 背景工作的取消旗標
+struct CancelFlag(Arc<AtomicBool>);
+
+impl ziptool_core::Progress for CancelFlag {
+    fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
 }
 
 enum Dialog {
@@ -779,8 +799,10 @@ impl App {
 
     fn start_loading(&mut self, path: PathBuf, inner: String, password: Option<String>) {
         let (p, pw) = (path.clone(), password.clone());
-        let handle = std::thread::spawn(move || ziptool_core::list(&p, pw.as_deref()));
-        self.loading = Some(Loading { path, inner, password, handle, from_history: self.history_nav });
+        let cancel = Arc::new(AtomicBool::new(false));
+        let flag = CancelFlag(cancel.clone());
+        let handle = std::thread::spawn(move || ziptool_core::list_with_progress(&p, pw.as_deref(), &flag));
+        self.loading = Some(Loading { path, inner, password, handle, from_history: self.history_nav, _cancel: CancelOnDrop(cancel) });
     }
 
     fn refresh(&mut self) {
@@ -2670,12 +2692,6 @@ fn is_executable(name: &str) -> bool {
 
 /// 解出壓縮檔內的單一檔案到暫存資料夾後讀取預覽，再刪除暫存資料夾
 fn preview_inside(archive: &Path, entry: &str, strip: &str, password: Option<String>, cancel: Arc<AtomicBool>) -> preview::Content {
-    struct Cancel(Arc<AtomicBool>);
-    impl ziptool_core::Progress for Cancel {
-        fn is_cancelled(&self) -> bool {
-            self.0.load(Ordering::Relaxed)
-        }
-    }
     let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     let dir = std::env::temp_dir().join("Zipo").join(format!("{}-preview-{stamp}", std::process::id()));
     // 宣告的大小可能造假：實際寫出超過上限就停止
@@ -2686,7 +2702,7 @@ fn preview_inside(archive: &Path, entry: &str, strip: &str, password: Option<Str
         max_bytes: Some(preview::MAX_ARCHIVE_PREVIEW),
         ..Default::default()
     };
-    let content = match ziptool_core::extract(archive, &dir, &opts, &Cancel(cancel)) {
+    let content = match ziptool_core::extract(archive, &dir, &opts, &CancelFlag(cancel)) {
         // 解出的檔名可能經過清理（例如 C:x.txt → C_x.txt），不可用項目名稱組路徑
         Ok(r) if r.issues.is_empty() => match jobs::extracted_file(&dir) {
             Some(file) => preview::load(&file),
@@ -3199,8 +3215,11 @@ mod job_tests {
         let mut app = App::new(Some(t.path().to_path_buf()));
         app.navigate(Location::Archive { path: ar, inner: String::new() });
         assert!(app.loading.is_some());
+        // 放棄讀取時通知背景工作停止（例如正在接合大型分割檔）
+        let cancel = app.loading.as_ref().unwrap()._cancel.0.clone();
         let elsewhere = t.path().join("src");
         app.navigate(Location::Dir(elsewhere.clone()));
+        assert!(cancel.load(Ordering::Relaxed), "應通知背景讀取停止");
         std::thread::sleep(Duration::from_millis(300));
         for _ in 0..10 {
             app.poll(&ctx);

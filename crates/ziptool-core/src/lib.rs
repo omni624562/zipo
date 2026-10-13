@@ -430,7 +430,12 @@ fn check_size(need: u64, packed: u64, available: Option<u64>, allow_high_ratio: 
 
 /// 列出 `archive` 的內容。
 pub fn list(archive: &Path, password: Option<&str>) -> Result<Vec<Entry>> {
-    let joined = volume::join_if_split(archive, &NoProgress)?;
+    list_with_progress(archive, password, &NoProgress)
+}
+
+/// 同 [`list`]，可以取消（分割檔要先接合，檔案很大時需要一段時間）。
+pub fn list_with_progress(archive: &Path, password: Option<&str>, progress: &dyn Progress) -> Result<Vec<Entry>> {
+    let joined = volume::join_if_split(archive, progress)?;
     let original = archive;
     let archive = joined.as_ref().map_or(archive, |j| j.path.as_path());
     let mut entries = match detect_joined(original, archive)? {
