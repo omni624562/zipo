@@ -40,6 +40,8 @@ pub struct AddDialog {
     password: String,
     password2: String,
     show_password: bool,
+    /// 勾選「設定密碼」才顯示密碼欄並加密
+    use_password: bool,
     encrypt_names: bool,
     /// 壓縮後將原始檔移到資源回收筒
     recycle: bool,
@@ -63,7 +65,7 @@ impl AddDialog {
         } else {
             dir.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| L!("壓縮檔", "Archive").into())
         };
-        // 單檔格式只能壓縮一個檔案；上次用單檔格式、這次選多個時改回 7z
+        // 單檔格式只能壓縮一個檔案；上次用單檔格式、這次選多個時改用 zip
         let format = if format.is_single() && (inputs.len() != 1 || first.is_dir()) { Format::Zip } else { format };
         Self {
             archive: dir.join(format!("{stem}.{}", format.extension())).display().to_string(),
@@ -73,6 +75,7 @@ impl AddDialog {
             password: String::new(),
             password2: String::new(),
             show_password: false,
+            use_password: false,
             encrypt_names: false,
             recycle: false,
             open_folder: false,
@@ -88,6 +91,9 @@ impl AddDialog {
     }
 
     fn set_format(&mut self, f: Format) {
+        if !f.supports_password() {
+            self.use_password = false;
+        }
         let path = PathBuf::from(&self.archive);
         let name = file_name(&path);
         let stem = Format::split_extension(&name).map(|(s, _)| s.to_string()).unwrap_or(name);
@@ -103,7 +109,10 @@ impl AddDialog {
         if self.format.is_single() && (self.inputs.len() != 1 || self.inputs[0].is_dir()) {
             return Err(F!("{} 只能壓縮單一檔案，請改用 7z、zip 或 tar 格式", "{} can only compress a single file; use the 7z, zip or tar format instead", self.format.name()));
         }
-        let password = if self.format.supports_password() && !self.password.is_empty() {
+        if self.use_password && self.format.supports_password() && self.password.is_empty() {
+            return Err(L!("請輸入密碼，或取消勾選「設定密碼」", "Enter a password, or uncheck \"Set a password\"").into());
+        }
+        let password = if self.use_password && self.format.supports_password() && !self.password.is_empty() {
             if !self.show_password && self.password != self.password2 {
                 return Err(L!("兩次輸入的密碼不一致", "The passwords do not match").into());
             }
@@ -142,6 +151,10 @@ impl AddDialog {
         let p = pal(ui);
         ui.set_width(560.0);
         dialog_title(ui, icon::FILE_ARCHIVE, L!("壓縮", "Compress"));
+        let names: Vec<String> = self.inputs.iter().take(3).map(|p| file_name(p)).collect();
+        let more = if self.inputs.len() > 3 { F!(" 等 {} 個項目", " and {} items in total", self.inputs.len()) } else { String::new() };
+        ui.label(RichText::new(F!("要壓縮：{}{more}", "To compress: {}{more}", names.join(L!("、", ", ")))).color(p.text2));
+        ui.add_space(6.0);
 
         field_label(ui, L!("壓縮檔", "Archive"));
         let format = self.format;
@@ -150,14 +163,13 @@ impl AddDialog {
         {
             self.archive = p.display().to_string();
         }
-        ui.add_space(10.0);
+        ui.add_space(4.0);
 
-        ui.columns(2, |cols| {
-            let ui = &mut cols[0];
-            egui::Grid::new("add_opts").num_columns(2).spacing([10.0, 10.0]).show(ui, |ui| {
-                field_label(ui, L!("壓縮格式", "Format"));
+        egui::Grid::new("add_opts").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
+            field_label(ui, L!("格式", "Format"));
+            ui.horizontal(|ui| {
                 let mut f = self.format;
-                egui::ComboBox::from_id_salt("fmt").width(150.0).selected_text(f.name()).show_ui(ui, |ui| {
+                egui::ComboBox::from_id_salt("fmt").width(130.0).selected_text(f.name()).show_ui(ui, |ui| {
                     for x in Format::ALL {
                         ui.selectable_value(&mut f, x, x.name());
                     }
@@ -165,34 +177,52 @@ impl AddDialog {
                 if f != self.format {
                     self.set_format(f);
                 }
-                ui.end_row();
+                ui.label(RichText::new(format_hint(self.format)).size(12.5).color(p.text2));
+            });
+            ui.end_row();
 
-                field_label(ui, L!("壓縮等級", "Level"));
-                egui::ComboBox::from_id_salt("lvl").width(150.0).selected_text(pick(LEVELS[self.level].1, LEVELS[self.level].2)).show_ui(ui, |ui| {
-                    for (i, (n, zh, en)) in LEVELS.iter().enumerate() {
-                        let name = pick(zh, en);
-                        ui.selectable_value(&mut self.level, i, F!("{name}（{n}）", "{name} ({n})"));
-                    }
+            field_label(ui, L!("壓縮等級", "Level"));
+            egui::ComboBox::from_id_salt("lvl").width(130.0).selected_text(pick(LEVELS[self.level].1, LEVELS[self.level].2)).show_ui(ui, |ui| {
+                for (i, (n, zh, en)) in LEVELS.iter().enumerate() {
+                    let name = pick(zh, en);
+                    ui.selectable_value(&mut self.level, i, F!("{name}（{n}）", "{name} ({n})"));
+                }
+            });
+            ui.end_row();
+        });
+        ui.add_space(4.0);
+
+        // 密碼：勾選後才顯示欄位
+        let ok = self.format.supports_password();
+        ui.add_enabled_ui(ok, |ui| {
+            let r = ui.checkbox(&mut self.use_password, L!("設定密碼（AES-256 加密）", "Set a password (AES-256 encryption)"));
+            if !ok {
+                r.on_disabled_hover_text(L!("這個格式不支援密碼，請改用 zip 或 7z", "This format does not support passwords; use zip or 7z"));
+            }
+        });
+        if self.use_password && ok {
+            ui.indent("pw", |ui| {
+                password_field(ui, &mut self.password, self.show_password, L!("輸入密碼", "Enter password"));
+                if !self.show_password {
+                    password_field(ui, &mut self.password2, false, L!("再次輸入密碼", "Re-enter password"));
+                }
+                ui.checkbox(&mut self.show_password, L!("顯示密碼", "Show password"));
+                ui.add_enabled_ui(self.format == Format::SevenZ, |ui| {
+                    ui.checkbox(&mut self.encrypt_names, L!("連檔案名稱也加密（沒有密碼就看不到裡面有哪些檔案）", "Also encrypt file names (nothing is visible without the password)"))
+                        .on_disabled_hover_text(L!("只有 7z 格式可以加密檔案名稱", "Only the 7z format can encrypt file names"));
                 });
-                ui.end_row();
+            });
+        }
+        ui.checkbox(&mut self.recycle, L!("壓縮後將原始檔移到資源回收筒", "Move the original files to the Recycle Bin afterwards"))
+            .on_hover_text(L!("會先檢查壓縮檔是否完整，確認無誤才移除；可以從資源回收筒還原", "The archive is tested first and the files are removed only if it is intact; they can be restored from the Recycle Bin"));
+        ui.checkbox(&mut self.open_folder, L!("完成後開啟所在資料夾", "Open the folder when done"));
+        ui.add_space(4.0);
 
-                field_label(ui, L!("壓縮方法", "Method"));
-                let method = match self.format {
-                    Format::SevenZ => "LZMA2",
-                    Format::Zip => if LEVELS[self.level].0 == 0 { "Store" } else { "Deflate" },
-                    Format::Tar => L!("無（只封裝）", "None (store only)"),
-                    Format::TarGz | Format::Gz => "Deflate (gzip)",
-                    Format::TarBz2 | Format::Bz2 => "BZip2",
-                    Format::TarXz | Format::Xz => "LZMA2 (xz)",
-                    Format::TarZst | Format::Zst => "Zstandard",
-                    // 只能讀取，不會出現在可選的格式中
-                    Format::Iso => "—",
-                };
-                ui.label(RichText::new(method).color(p.text));
-                ui.end_row();
-
-                field_label(ui, L!("分割大小", "Split"));
-                egui::ComboBox::from_id_salt("vol").width(150.0).selected_text(pick(VOLUMES[self.volume].0, VOLUMES[self.volume].1)).show_ui(ui, |ui| {
+        // 少用的選項收起來（展開與否會記住）
+        egui::CollapsingHeader::new(RichText::new(L!("更多選項", "More options")).color(p.text)).id_salt("add_more").show(ui, |ui| {
+            egui::Grid::new("add_more_grid").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
+                field_label(ui, L!("分割成多個檔案", "Split into volumes"));
+                egui::ComboBox::from_id_salt("vol").width(180.0).selected_text(pick(VOLUMES[self.volume].0, VOLUMES[self.volume].1)).show_ui(ui, |ui| {
                     for (i, (zh, en, _)) in VOLUMES.iter().enumerate() {
                         ui.selectable_value(&mut self.volume, i, pick(zh, en));
                     }
@@ -206,35 +236,22 @@ impl AddDialog {
                     });
                     ui.end_row();
                 }
-            });
-
-            let ui = &mut cols[1];
-            let ok = self.format.supports_password();
-            egui::Frame::group(ui.style()).corner_radius(8).show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.label(RichText::new(L!("加密", "Encryption")).strong().color(p.text));
-                ui.add_enabled_ui(ok, |ui| {
-                    password_field(ui, &mut self.password, self.show_password, if ok { L!("輸入密碼", "Enter password") } else { L!("此格式不支援密碼", "This format does not support passwords") });
-                    if !self.show_password {
-                        password_field(ui, &mut self.password2, false, L!("再次輸入密碼", "Re-enter password"));
-                    }
-                    ui.checkbox(&mut self.show_password, L!("顯示密碼", "Show password"));
-                    ui.add_enabled_ui(self.format == Format::SevenZ, |ui| {
-                        ui.checkbox(&mut self.encrypt_names, L!("加密檔案名稱", "Encrypt file names"));
-                    });
-                    ui.label(RichText::new(L!("加密方式：AES-256", "Method: AES-256")).size(12.0).color(p.text2));
-                });
+                field_label(ui, L!("壓縮方法", "Method"));
+                let method = match self.format {
+                    Format::SevenZ => "LZMA2",
+                    Format::Zip => if LEVELS[self.level].0 == 0 { "Store" } else { "Deflate" },
+                    Format::Tar => L!("無（只封裝）", "None (store only)"),
+                    Format::TarGz | Format::Gz => "Deflate (gzip)",
+                    Format::TarBz2 | Format::Bz2 => "BZip2",
+                    Format::TarXz | Format::Xz => "LZMA2 (xz)",
+                    Format::TarZst | Format::Zst => "Zstandard",
+                    // 只能讀取，不會出現在可選的格式中
+                    Format::Iso => "—",
+                };
+                ui.label(RichText::new(method).color(p.text2));
+                ui.end_row();
             });
         });
-
-        ui.add_space(8.0);
-        let names: Vec<String> = self.inputs.iter().take(3).map(|p| file_name(p)).collect();
-        let more = if self.inputs.len() > 3 { F!(" 等 {} 個項目", " and {} items in total", self.inputs.len()) } else { String::new() };
-        ui.label(RichText::new(F!("要壓縮：{}{more}", "To compress: {}{more}", names.join(L!("、", ", ")))).size(12.5).color(p.text2));
-        ui.add_space(4.0);
-        ui.checkbox(&mut self.recycle, L!("壓縮後將原始檔移到資源回收筒", "Move the original files to the Recycle Bin afterwards"))
-            .on_hover_text(L!("會先檢查壓縮檔是否完整，確認無誤才移除；可以從資源回收筒還原", "The archive is tested first and the files are removed only if it is intact; they can be restored from the Recycle Bin"));
-        ui.checkbox(&mut self.open_folder, L!("完成後開啟所在資料夾", "Open the folder when done"));
         if let Some(e) = &self.error {
             error_text(ui, e);
         }
@@ -249,6 +266,16 @@ impl AddDialog {
             }
         }
         Outcome::Pending
+    }
+}
+
+/// 格式旁的一句說明：幫助選擇
+fn format_hint(f: Format) -> &'static str {
+    match f {
+        Format::Zip => L!("Windows、macOS 不必安裝軟體就能開啟", "Opens on Windows and macOS without extra software"),
+        Format::SevenZ => L!("壓縮得最小；對方需要 7-Zip 或 Zipo", "Smallest; needs 7-Zip or Zipo to open"),
+        f if f.is_single() => L!("只能壓縮單一檔案", "Compresses a single file only"),
+        _ => L!("常用於 Linux、macOS", "Common on Linux and macOS"),
     }
 }
 
@@ -464,5 +491,29 @@ impl PasswordDialog {
         } else {
             Outcome::Pending
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 密碼只在勾選「設定密碼」時使用；勾選了卻沒輸入時提醒
+    #[test]
+    fn password_is_used_only_when_enabled() {
+        let t = tempfile::tempdir().unwrap();
+        let f = t.path().join("a.txt");
+        std::fs::write(&f, "a").unwrap();
+        let mut d = AddDialog::new(vec![f], Format::Zip, 3);
+        d.password = "secret".into();
+        d.password2 = "secret".into();
+        let Ok(Task::Compress { opts, .. }) = d.validate() else { panic!() };
+        assert_eq!(opts.password, None, "沒有勾選：不加密");
+        d.use_password = true;
+        let Ok(Task::Compress { opts, .. }) = d.validate() else { panic!() };
+        assert_eq!(opts.password.as_deref(), Some("secret"));
+        d.password.clear();
+        d.password2.clear();
+        assert!(d.validate().is_err_and(|e| e.contains("密碼")), "勾選了卻沒輸入");
     }
 }
