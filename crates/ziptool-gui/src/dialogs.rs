@@ -293,6 +293,15 @@ pub struct ExtractDialog {
 }
 
 impl ExtractDialog {
+    /// 測試用：要解壓縮的壓縮檔數量
+    #[cfg(test)]
+    pub fn archive_count(&self) -> usize {
+        match &self.source {
+            ExtractSource::Files(f) => f.len(),
+            ExtractSource::Inside { .. } => 1,
+        }
+    }
+
     pub fn new(source: ExtractSource, password: Option<String>) -> Self {
         let dest = match &source {
             ExtractSource::Files(files) if files.len() == 1 => default_dest(&files[0]),
@@ -387,7 +396,7 @@ impl ExtractDialog {
                 }
             };
             let then = Then { recycle: self.recycle && matches!(self.source, ExtractSource::Files(_)), open_folder: self.open_folder };
-            return Outcome::Ok(Task::Extract { archives, dest, opts, smart: self.smart && !self.flatten, then });
+            return Outcome::Ok(Task::Extract { archives, dest, opts, smart: self.smart && !self.flatten, here: false, then });
         }
         Outcome::Pending
     }

@@ -182,13 +182,13 @@ fn notify_assoc_changed() {
     unsafe { SHChangeNotify(SHCNE_ASSOCCHANGED, 0, std::ptr::null(), std::ptr::null()) };
 }
 
-/// 在檔案總管選取多個檔案執行「加入壓縮檔」時，Windows 會每個檔案各啟動一個 Zipo。
-/// 第一個啟動的負責收集，其他的把路徑交給它後結束，最後只開一個對話框、包含全部檔案。
-/// 回傳 `None` 代表路徑已交給另一個 Zipo，這個應直接結束。
+/// 在檔案總管選取多個檔案執行右鍵選單的項目時，Windows 會每個檔案各啟動一個 Zipo。
+/// 第一個啟動的負責收集，其他的把路徑交給它後結束，最後只開一個視窗、處理全部檔案。
+/// `kind` 區分不同的選單項目（add、extract-here…）；回傳 `None` 代表路徑已交給另一個 Zipo，這個應直接結束。
 #[cfg(windows)]
-pub fn collect_add(paths: Vec<PathBuf>) -> Option<Vec<PathBuf>> {
-    let queue = std::env::temp_dir().join("Zipo").join("add-queue");
-    collect_add_in(&queue, r"Local\Zipo.AddCollector", paths, std::time::Duration::from_millis(400))
+pub fn collect(kind: &str, paths: Vec<PathBuf>) -> Option<Vec<PathBuf>> {
+    let queue = std::env::temp_dir().join("Zipo").join(format!("{kind}-queue"));
+    collect_in(&queue, &format!(r"Local\Zipo.Collect.{kind}"), paths, std::time::Duration::from_millis(400))
 }
 
 /// 路徑以 UTF-16 存放（Windows 的檔名可能不是有效的 UTF-8），每個以 0 結尾
@@ -208,7 +208,7 @@ fn decode_paths(bytes: &[u8]) -> Vec<PathBuf> {
 /// `queue`：放路徑的資料夾；`mutex`：收集者的具名 mutex（行程結束時自動釋放）；
 /// `quiet`：這段時間內沒有新的路徑就停止收集（最多 3 秒）
 #[cfg(windows)]
-pub fn collect_add_in(queue: &Path, mutex: &str, paths: Vec<PathBuf>, quiet: std::time::Duration) -> Option<Vec<PathBuf>> {
+pub fn collect_in(queue: &Path, mutex: &str, paths: Vec<PathBuf>, quiet: std::time::Duration) -> Option<Vec<PathBuf>> {
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::{Duration, Instant, SystemTime};
     use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError};
@@ -284,7 +284,7 @@ pub fn collect_add_in(queue: &Path, mutex: &str, paths: Vec<PathBuf>, quiet: std
 }
 
 #[cfg(not(windows))]
-pub fn collect_add(paths: Vec<PathBuf>) -> Option<Vec<PathBuf>> {
+pub fn collect(_kind: &str, paths: Vec<PathBuf>) -> Option<Vec<PathBuf>> {
     Some(paths)
 }
 
@@ -391,7 +391,7 @@ mod tests {
                 .iter()
                 .map(|n| {
                     let (queue, name, p) = (queue.clone(), name.clone(), t.path().join(n));
-                    s.spawn(move || collect_add_in(&queue, &name, vec![p], std::time::Duration::from_millis(300)))
+                    s.spawn(move || collect_in(&queue, &name, vec![p], std::time::Duration::from_millis(300)))
                 })
                 .collect();
             handles.into_iter().map(|h| h.join().unwrap()).collect()
@@ -404,7 +404,7 @@ mod tests {
         assert_eq!(std::fs::read_dir(&queue).unwrap().count(), 0, "佇列應清空");
 
         // 只有一個：照常使用自己的路徑
-        let one = collect_add_in(&queue, &name, vec![t.path().join("x")], std::time::Duration::from_millis(50));
+        let one = collect_in(&queue, &name, vec![t.path().join("x")], std::time::Duration::from_millis(50));
         assert_eq!(one, Some(vec![t.path().join("x")]));
     }
 

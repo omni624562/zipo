@@ -25,7 +25,9 @@ pub enum Task {
     Compress { inputs: Vec<PathBuf>, output: PathBuf, format: Format, opts: CompressOptions, then: Then },
     /// 多個壓縮檔時，每個解到 `dest/<名稱>`；單一壓縮檔直接解到 `dest`。
     /// `smart`：壓縮檔內只有一個最上層資料夾時，不再多包一層同名資料夾。
-    Extract { archives: Vec<PathBuf>, dest: PathBuf, opts: ExtractOptions, smart: bool, then: Then },
+    /// `here`：每個壓縮檔直接解到它所在的資料夾（右鍵選單「解壓縮到這裡」，`dest` 不使用）；
+    /// 否則多個壓縮檔各自解到 `dest` 底下的同名資料夾
+    Extract { archives: Vec<PathBuf>, dest: PathBuf, opts: ExtractOptions, smart: bool, here: bool, then: Then },
     Test { archives: Vec<PathBuf>, password: Option<String> },
     /// 更新既有壓縮檔：加入檔案到 `into` 資料夾、刪除 `remove` 中的項目。
     Update { archive: PathBuf, add: Vec<PathBuf>, into: String, remove: Vec<String>, password: Option<String> },
@@ -310,13 +312,17 @@ fn run(task: Task, s: &Shared) -> Result<Outcome, Error> {
                 ..Default::default()
             })
         }
-        Task::Extract { archives, dest, opts, smart, then } => {
+        Task::Extract { archives, dest, opts, smart, here, then } => {
             let n = archives.len();
             let (mut files, mut bytes, mut issues, mut skipped) = (0, 0, Vec::new(), 0);
             let mut shown = dest.clone();
             for (i, ar) in archives.iter().enumerate() {
                 stage(s, i, n, ar);
-                let mut out = if n > 1 { dest.join(archive_stem(ar)) } else { dest.clone() };
+                let mut out = match ar.parent() {
+                    Some(p) if here => p.to_path_buf(),
+                    _ if n > 1 => dest.join(archive_stem(ar)),
+                    _ => dest.clone(),
+                };
                 if smart {
                     out = smart_dest(ar, out, &opts);
                 }
@@ -595,14 +601,14 @@ mod then_tests {
 
         // 全部解出：壓縮檔移除
         let ar = make("all.zip");
-        let o = finish(Task::Extract { archives: vec![ar.clone()], dest: t.path().join("x1"), opts: Default::default(), smart: false, then });
+        let o = finish(Task::Extract { archives: vec![ar.clone()], dest: t.path().join("x1"), opts: Default::default(), smart: false, here: false, then });
         assert!(o.message.contains("壓縮檔已移到資源回收筒"), "{}", o.message);
         assert!(!ar.exists() && !o.auto_open);
 
         // 只解出部分項目：壓縮檔保留
         let ar = make("part.zip");
         let opts = ExtractOptions { selection: Some(vec!["a.txt".into()]), ..Default::default() };
-        let o = finish(Task::Extract { archives: vec![ar.clone()], dest: t.path().join("x2"), opts, smart: false, then });
+        let o = finish(Task::Extract { archives: vec![ar.clone()], dest: t.path().join("x2"), opts, smart: false, here: false, then });
         assert!(o.message.contains("壓縮檔保留不動"), "{}", o.message);
         assert!(ar.exists());
 
@@ -611,7 +617,7 @@ mod then_tests {
         std::fs::create_dir_all(t.path().join("x4")).unwrap();
         std::fs::write(t.path().join("x4/a.txt"), "舊版").unwrap();
         let opts = ExtractOptions { overwrite: ziptool_core::Overwrite::Skip, ..Default::default() };
-        let o = finish(Task::Extract { archives: vec![ar.clone()], dest: t.path().join("x4"), opts, smart: false, then });
+        let o = finish(Task::Extract { archives: vec![ar.clone()], dest: t.path().join("x4"), opts, smart: false, here: false, then });
         assert!(o.message.contains("壓縮檔保留不動"), "{}", o.message);
         assert!(ar.exists());
         assert_eq!(std::fs::read_to_string(t.path().join("x4/a.txt")).unwrap(), "舊版");
@@ -622,14 +628,14 @@ mod then_tests {
         ziptool_core::compress(&[src.clone(), t.path().join("b.txt")], &whole, Format::Zip, &opts, &ziptool_core::NoProgress).unwrap();
         let first = t.path().join("vol.zip.001");
         assert!(t.path().join("vol.zip.002").exists());
-        let o = finish(Task::Extract { archives: vec![first], dest: t.path().join("x5"), opts: Default::default(), smart: false, then });
+        let o = finish(Task::Extract { archives: vec![first], dest: t.path().join("x5"), opts: Default::default(), smart: false, here: false, then });
         assert!(o.message.contains("壓縮檔已移到資源回收筒"), "{}", o.message);
         let left: Vec<_> = std::fs::read_dir(t.path()).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with("vol.zip.0") && !n.ends_with(".recycled")).collect();
         assert!(left.is_empty(), "分割檔應全部移除：{left:?}");
 
         // 沒有勾選：不動
         let ar = make("keep.zip");
-        finish(Task::Extract { archives: vec![ar.clone()], dest: t.path().join("x3"), opts: Default::default(), smart: false, then: Then::default() });
+        finish(Task::Extract { archives: vec![ar.clone()], dest: t.path().join("x3"), opts: Default::default(), smart: false, here: false, then: Then::default() });
         assert!(ar.exists());
     }
 }

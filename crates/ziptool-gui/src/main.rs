@@ -130,14 +130,14 @@ fn run_app() -> eframe::Result {
                 .ok_or_else(|| L!("找不到可用的顯示卡", "No usable graphics adapter was found").to_string())
         }));
     }
+    // 檔案總管選取多個檔案時每個各啟動一個 Zipo：合併成一個視窗，其餘直接結束
     let start = match parse_args(std::env::args_os().skip(1).collect()) {
-        // 檔案總管選取多個檔案時每個各啟動一個 Zipo：合併成一個對話框，其餘直接結束
-        StartAction::Add(paths) => match shell::collect_add(paths) {
-            Some(all) => StartAction::Add(all),
-            None => return Ok(()),
-        },
-        other => other,
+        StartAction::Add(p) => shell::collect("add", p).map(StartAction::Add),
+        StartAction::ExtractHere(p) => shell::collect("extract-here", p).map(StartAction::ExtractHere),
+        StartAction::ExtractFolder(p) => shell::collect("extract-folder", p).map(StartAction::ExtractFolder),
+        other => Some(other),
     };
+    let Some(start) = start else { return Ok(()) };
     eframe::run_native(
         // 設定儲存名稱維持舊名，保留使用者原有的設定
         "ZipTool",
@@ -179,8 +179,8 @@ enum StartAction {
     None,
     Open(PathBuf),
     Add(Vec<PathBuf>),
-    ExtractHere(PathBuf),
-    ExtractFolder(PathBuf),
+    ExtractHere(Vec<PathBuf>),
+    ExtractFolder(Vec<PathBuf>),
 }
 
 fn parse_args(args: Vec<std::ffi::OsString>) -> StartAction {
@@ -189,8 +189,8 @@ fn parse_args(args: Vec<std::ffi::OsString>) -> StartAction {
     let rest: Vec<PathBuf> = it.map(PathBuf::from).collect();
     match first.to_str() {
         Some("--add") if !rest.is_empty() => StartAction::Add(rest),
-        Some("--extract-here") if rest.len() == 1 => StartAction::ExtractHere(rest[0].clone()),
-        Some("--extract-folder") if rest.len() == 1 => StartAction::ExtractFolder(rest[0].clone()),
+        Some("--extract-here") if !rest.is_empty() => StartAction::ExtractHere(rest),
+        Some("--extract-folder") if !rest.is_empty() => StartAction::ExtractFolder(rest),
         Some(s) if s.starts_with("--") => StartAction::None,
         _ => StartAction::Open(PathBuf::from(first)),
     }
@@ -661,15 +661,15 @@ impl App {
                 self.navigate(Location::Dir(parent(&paths[0])));
                 self.dialog = Some(Dialog::Add(self.with_open_after_add(AddDialog::new(paths, self.add_format, self.add_level))));
             }
-            StartAction::ExtractHere(ar) => {
-                let dir = parent(&ar);
+            StartAction::ExtractHere(archives) => {
+                let dir = parent(&archives[0]);
                 self.navigate(Location::Dir(dir.clone()));
                 let opts = ziptool_core::ExtractOptions { overwrite: ziptool_core::Overwrite::Ask, ..Default::default() };
-                self.spawn(Task::Extract { archives: vec![ar], dest: dir, opts, smart: false, then: Then::default() });
+                self.spawn(Task::Extract { archives, dest: dir, opts, smart: false, here: true, then: Then::default() });
             }
-            StartAction::ExtractFolder(ar) => {
-                self.navigate(Location::Dir(parent(&ar)));
-                self.dialog = Some(Dialog::Extract(self.with_open_after_extract(ExtractDialog::new(ExtractSource::Files(vec![ar]), None))));
+            StartAction::ExtractFolder(archives) => {
+                self.navigate(Location::Dir(parent(&archives[0])));
+                self.dialog = Some(Dialog::Extract(self.with_open_after_extract(ExtractDialog::new(ExtractSource::Files(archives), None))));
             }
         }
     }
@@ -2964,7 +2964,7 @@ impl App {
                             let dest = dialogs::default_dest(path);
                             let overwrite = if d == "progress-ask" { ziptool_core::Overwrite::Ask } else { Default::default() };
                             let opts = ziptool_core::ExtractOptions { overwrite, ..Default::default() };
-                            self.spawn(Task::Extract { archives: vec![path.clone()], dest, opts, smart: true, then: Then::default() });
+                            self.spawn(Task::Extract { archives: vec![path.clone()], dest, opts, smart: true, here: false, then: Then::default() });
                         }
                     }
                     _ => {}
@@ -3139,6 +3139,7 @@ mod job_tests {
             dest: dest.to_path_buf(),
             opts: ExtractOptions { overwrite: Overwrite::Ask, ..Default::default() },
             smart: false,
+            here: false,
             then: Then::default(),
         }
     }
@@ -3259,7 +3260,7 @@ mod smart_tests {
         let ar = make(t.path(), "proj.zip", &["proj"]);
         let out = t.path().join("dest");
         std::fs::create_dir_all(&out).unwrap();
-        let task = Task::Extract { archives: vec![ar], dest: out.join("proj"), opts: Default::default(), smart: true, then: Then::default() };
+        let task = Task::Extract { archives: vec![ar], dest: out.join("proj"), opts: Default::default(), smart: true, here: false, then: Then::default() };
         let job = Job::spawn(task);
         while !job.is_finished() {
             std::thread::sleep(Duration::from_millis(10));
@@ -3567,8 +3568,8 @@ mod start_tests {
         assert_eq!(parse_args(args(&[])), StartAction::None);
         assert_eq!(parse_args(args(&["D:\\a.7z"])), StartAction::Open("D:\\a.7z".into()));
         assert_eq!(parse_args(args(&["--add", "a", "b"])), StartAction::Add(vec!["a".into(), "b".into()]));
-        assert_eq!(parse_args(args(&["--extract-here", "x.zip"])), StartAction::ExtractHere("x.zip".into()));
-        assert_eq!(parse_args(args(&["--extract-folder", "x.zip"])), StartAction::ExtractFolder("x.zip".into()));
+        assert_eq!(parse_args(args(&["--extract-here", "x.zip"])), StartAction::ExtractHere(vec!["x.zip".into()]));
+        assert_eq!(parse_args(args(&["--extract-folder", "x.zip"])), StartAction::ExtractFolder(vec!["x.zip".into()]));
         assert_eq!(parse_args(args(&["--add"])), StartAction::None, "缺少參數時不做任何事");
         assert_eq!(parse_args(args(&["--unknown", "x"])), StartAction::None);
     }
@@ -3584,7 +3585,7 @@ mod start_tests {
 
         let ctx = egui::Context::default();
         let mut app = App::new(None);
-        app.apply_start(StartAction::ExtractHere(ar));
+        app.apply_start(StartAction::ExtractHere(vec![ar]));
         for _ in 0..400 {
             app.poll(&ctx);
             if app.job.is_none() {
@@ -3594,6 +3595,39 @@ mod start_tests {
         }
         assert_eq!(std::fs::read_to_string(&src).unwrap(), "內容");
         assert!(matches!(app.dialog, Some(Dialog::Notice { ok: true, .. })));
+    }
+
+    /// 右鍵選單對多個壓縮檔（合併成一次）：「解壓縮到這裡」各自解到所在的資料夾；「解壓縮到資料夾」開一個對話框
+    #[test]
+    fn extract_several_archives_from_context_menu() {
+        let t = tempfile::tempdir().unwrap();
+        let root = real_path(t.path());
+        let mut archives = Vec::new();
+        for n in ["一", "二"] {
+            let src = root.join(format!("{n}.txt"));
+            std::fs::write(&src, n).unwrap();
+            let ar = root.join(format!("{n}.zip"));
+            ziptool_core::compress(std::slice::from_ref(&src), &ar, Format::Zip, &Default::default(), &ziptool_core::NoProgress).unwrap();
+            std::fs::remove_file(&src).unwrap();
+            archives.push(ar);
+        }
+        let ctx = egui::Context::default();
+        let mut app = App::new(None);
+        app.apply_start(StartAction::ExtractHere(archives.clone()));
+        for _ in 0..400 {
+            app.poll(&ctx);
+            if app.job.is_none() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(matches!(app.dialog, Some(Dialog::Notice { ok: true, .. })));
+        assert_eq!(std::fs::read_to_string(root.join("一.txt")).unwrap(), "一", "直接解到所在的資料夾");
+        assert_eq!(std::fs::read_to_string(root.join("二.txt")).unwrap(), "二");
+
+        let mut app = App::new(None);
+        app.apply_start(StartAction::ExtractFolder(archives));
+        assert!(matches!(&app.dialog, Some(Dialog::Extract(d)) if d.archive_count() == 2));
     }
 
     /// 右鍵選單對分割壓縮檔的第一個（.001）「解壓縮到這裡」「解壓縮到資料夾」
@@ -3614,7 +3648,7 @@ mod start_tests {
 
         let ctx = egui::Context::default();
         let mut app = App::new(None);
-        app.apply_start(StartAction::ExtractHere(first.clone()));
+        app.apply_start(StartAction::ExtractHere(vec![first.clone()]));
         for _ in 0..400 {
             app.poll(&ctx);
             if app.job.is_none() {
