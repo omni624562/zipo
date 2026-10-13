@@ -519,8 +519,13 @@ fn cmd_hash(a: &Args) -> anyhow::Result<()> {
 fn cmd_list(a: &Args) -> anyhow::Result<()> {
     let archive = archive_path(a)?;
     let entries = with_password(a, |pw| ziptool_core::list(archive, pw))?;
-    let format = Format::detect(archive)?;
-    println!("{}", F!("壓縮檔：{}\n格式：{}\n", "Archive: {}\nFormat: {}\n", archive.display(), format.name()));
+    // 不是壓縮檔的分割檔（影片.mkv.001）：接回的就是原檔
+    let format = match Format::detect(archive) {
+        Ok(f) => f.name(),
+        Err(_) if ziptool_core::is_first_volume(archive) => L!("分割檔", "Split file"),
+        Err(e) => return Err(e.into()),
+    };
+    println!("{}", F!("壓縮檔：{}\n格式：{}\n", "Archive: {}\nFormat: {}\n", archive.display(), format));
 
     let rule = "------------------- ----- ------------ ------------  ------------------------";
     println!("{}", F!("       日期時間       屬性         大小     壓縮後大小  名稱", "   Date      Time    Attr         Size   Compressed  Name"));

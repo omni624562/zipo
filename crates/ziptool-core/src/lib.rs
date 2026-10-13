@@ -377,14 +377,19 @@ pub fn update(
 pub fn extract(archive: &Path, dest: &Path, opts: &ExtractOptions, progress: &dyn Progress) -> Result<ExtractReport> {
     // 分割檔（名稱.001）先接回暫存的完整壓縮檔
     let joined = volume::join_if_split(archive, progress)?;
+    let original = archive;
     let archive = joined.as_ref().map_or(archive, |j| j.path.as_path());
-    let format = Format::detect(archive)?;
+    let format = detect_joined(original, archive)?;
     std::fs::create_dir_all(dest)?;
     let available = fs4::available_space(dest).ok();
     preflight(archive, format, dest, opts, available)?;
 
     let plan = util::Planner::new(archive, dest, opts, progress, available);
     let pw = opts.password.as_deref();
+    let Some(format) = format else {
+        cancelled_or(volume::extract_plain(archive, original, &plan, progress), progress)?;
+        return Ok(plan.finish());
+    };
     let res = match format {
         Format::Zip => zip_fmt::extract(archive, &plan, pw, progress),
         Format::Iso => iso::extract(archive, &plan, progress),
@@ -397,8 +402,8 @@ pub fn extract(archive: &Path, dest: &Path, opts: &ExtractOptions, progress: &dy
 }
 
 /// 依清單估算解壓後大小（只用於可快速讀取清單的 zip／7z），檢查磁碟空間與壓縮炸彈。
-fn preflight(archive: &Path, format: Format, dest: &Path, opts: &ExtractOptions, available: Option<u64>) -> Result<()> {
-    if !matches!(format, Format::Zip | Format::SevenZ) {
+fn preflight(archive: &Path, format: Option<Format>, dest: &Path, opts: &ExtractOptions, available: Option<u64>) -> Result<()> {
+    if !matches!(format, Some(Format::Zip | Format::SevenZ)) {
         return Ok(()); // 其他格式要完整解碼才知道大小，改由解壓時即時檢查
     }
     let entries = match list(archive, opts.password.as_deref()) {
@@ -426,13 +431,15 @@ fn check_size(need: u64, packed: u64, available: Option<u64>, allow_high_ratio: 
 /// 列出 `archive` 的內容。
 pub fn list(archive: &Path, password: Option<&str>) -> Result<Vec<Entry>> {
     let joined = volume::join_if_split(archive, &NoProgress)?;
+    let original = archive;
     let archive = joined.as_ref().map_or(archive, |j| j.path.as_path());
-    let mut entries = match Format::detect(archive)? {
-        Format::Zip => zip_fmt::list(archive)?,
-        Format::Iso => iso::list(archive)?,
-        Format::SevenZ => sevenz::list(archive, password)?,
-        f if f.is_tar() => tar_fmt::list(archive, f)?,
-        f => single::list(archive, f)?,
+    let mut entries = match detect_joined(original, archive)? {
+        None => volume::list_plain(archive, original)?,
+        Some(Format::Zip) => zip_fmt::list(archive)?,
+        Some(Format::Iso) => iso::list(archive)?,
+        Some(Format::SevenZ) => sevenz::list(archive, password)?,
+        Some(f) if f.is_tar() => tar_fmt::list(archive, f)?,
+        Some(f) => single::list(archive, f)?,
     };
     for e in &mut entries {
         e.name = util::normalize_name(&e.name);
@@ -444,15 +451,26 @@ pub fn list(archive: &Path, password: Option<&str>) -> Result<Vec<Entry>> {
 /// 測試壓縮檔完整性：完整解碼每個項目並驗證 CRC，但不寫出任何檔案。
 pub fn test(archive: &Path, password: Option<&str>, progress: &dyn Progress) -> Result<TestReport> {
     let joined = volume::join_if_split(archive, progress)?;
+    let original = archive;
     let archive = joined.as_ref().map_or(archive, |j| j.path.as_path());
-    let res = match Format::detect(archive)? {
-        Format::Zip => zip_fmt::test(archive, password, progress),
-        Format::Iso => iso::test(archive, progress),
-        Format::SevenZ => sevenz::test(archive, password, progress),
-        f if f.is_tar() => tar_fmt::test(archive, f, progress),
-        f => single::test(archive, f, progress),
+    let res = match detect_joined(original, archive)? {
+        None => volume::test_plain(archive, progress),
+        Some(Format::Zip) => zip_fmt::test(archive, password, progress),
+        Some(Format::Iso) => iso::test(archive, progress),
+        Some(Format::SevenZ) => sevenz::test(archive, password, progress),
+        Some(f) if f.is_tar() => tar_fmt::test(archive, f, progress),
+        Some(f) => single::test(archive, f, progress),
     };
     cancelled_or(res, progress)
+}
+
+/// 判斷格式；`original` 是分割檔、接回後卻不是壓縮檔時回傳 `None`（例如 影片.mkv.001，接回的就是原檔）
+fn detect_joined(original: &Path, archive: &Path) -> Result<Option<Format>> {
+    match Format::detect(archive) {
+        Ok(f) => Ok(Some(f)),
+        Err(Error::UnknownFormat(_)) if volume::is_first_volume(original) => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 /// 使用者已取消時，把錯誤統一換成 `Cancelled`。

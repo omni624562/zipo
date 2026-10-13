@@ -1044,6 +1044,28 @@ fn split_volumes_keep_mark_of_the_web() {
     assert!(fs::read_to_string(got).unwrap().contains("ZoneId=3"));
 }
 
+/// 不是壓縮檔的分割檔（例如 影片.mkv.001）：與 7-Zip 相同，視為一個檔案，解壓縮即接回原檔
+#[test]
+fn split_plain_file_is_joined_back() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut data = b"\x1aE\xdf\xa3 not an archive ".to_vec();
+    data.extend((0..250_000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8));
+    for (n, chunk) in data.chunks(100_000).enumerate() {
+        fs::write(tmp.path().join(format!("影片.mkv.{:03}", n + 1)), chunk).unwrap();
+    }
+    let first = tmp.path().join("影片.mkv.001");
+    let entries = list(&first, None).unwrap();
+    assert_eq!(entries.iter().map(|e| (e.name.as_str(), e.size)).collect::<Vec<_>>(), [("影片.mkv", Some(data.len() as u64))]);
+    let out = tmp.path().join("out");
+    let r = extract(&first, &out, &ExtractOptions::default(), &NoProgress).unwrap();
+    assert_eq!(r.files, 1);
+    assert_eq!(fs::read(out.join("影片.mkv")).unwrap(), data);
+    assert_eq!(test(&first, None, &NoProgress).unwrap().files, 1);
+    // 不是分割檔的未知格式：照常回報無法辨識
+    fs::write(tmp.path().join("x.mkv"), &data[..1000]).unwrap();
+    assert!(matches!(list(&tmp.path().join("x.mkv"), None), Err(Error::UnknownFormat(_))));
+}
+
 /// 建立測試用 ISO（Joliet：中文檔名與子資料夾）
 fn make_iso(path: &Path) {
     use hadris_iso::joliet::JolietLevel;

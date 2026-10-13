@@ -147,6 +147,39 @@ fn join(archive: &Path, parts: &[PathBuf], progress: &dyn crate::Progress) -> Re
     Ok(joined)
 }
 
+/// 不是壓縮檔的分割檔：接回的檔案本身就是唯一的項目（名稱為去掉 .001 的檔名，時間取第一個分割檔）
+pub(crate) fn list_plain(joined: &Path, first: &Path) -> Result<Vec<crate::Entry>> {
+    let size = std::fs::metadata(joined)?.len();
+    Ok(vec![crate::Entry {
+        name: plain_name(first),
+        is_dir: false,
+        size: Some(size),
+        compressed_size: Some(size),
+        modified: std::fs::metadata(first)?.modified().ok(),
+        encrypted: false,
+    }])
+}
+
+pub(crate) fn extract_plain(joined: &Path, first: &Path, plan: &crate::util::Planner, progress: &dyn crate::Progress) -> Result<()> {
+    progress.start(std::fs::metadata(joined)?.len());
+    let name = plain_name(first);
+    let Some(out) = plan.path_for(&name, false) else { return Ok(()) };
+    progress.entry(&name);
+    let mut r = crate::progress::ProgressReader::new(io::BufReader::new(File::open(joined)?), progress);
+    plan.write_file(&name, &out, &mut r, std::fs::metadata(first)?.modified().ok(), None)
+}
+
+pub(crate) fn test_plain(joined: &Path, progress: &dyn crate::Progress) -> Result<crate::TestReport> {
+    progress.start(std::fs::metadata(joined)?.len());
+    let mut r = crate::progress::ProgressReader::new(io::BufReader::new(File::open(joined)?), progress);
+    let bytes = io::copy(&mut r, &mut io::sink())?;
+    Ok(crate::TestReport { files: 1, bytes })
+}
+
+fn plain_name(first: &Path) -> String {
+    first.with_extension("").file_name().unwrap_or_default().to_string_lossy().into_owned()
+}
+
 /// 把 `path` 切成每個 `size` 位元組的分割檔，完成後刪除原檔；回傳所有分割檔
 pub(crate) fn split(path: &Path, size: u64) -> Result<Vec<PathBuf>> {
     if size == 0 {

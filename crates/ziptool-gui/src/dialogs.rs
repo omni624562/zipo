@@ -400,6 +400,8 @@ pub fn default_dest(archive: &Path) -> PathBuf {
     match Format::split_extension(&name) {
         Some((_, f)) if f.is_single() => dir,
         Some((stem, _)) if !stem.is_empty() => dir.join(stem),
+        // 不是壓縮檔的分割檔（影片.mkv.001）：解出的就是一個檔案
+        None if ziptool_core::is_first_volume(archive) => dir,
         _ => dir.join(format!("{name}_extracted")),
     }
 }

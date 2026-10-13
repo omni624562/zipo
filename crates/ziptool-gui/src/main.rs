@@ -913,7 +913,7 @@ impl App {
                 let path = self.row_path(&r).unwrap();
                 if r.is_dir {
                     self.navigate(Location::Dir(path));
-                } else if r.is_archive || Format::detect(&path).is_ok() {
+                } else if r.is_archive || ziptool_core::is_first_volume(&path) || Format::detect(&path).is_ok() {
                     self.navigate(Location::Archive { path, inner: String::new() });
                 } else if path.is_file() {
                     open_path(&path);
@@ -3620,6 +3620,8 @@ mod start_tests {
 
         // 解壓縮到資料夾：預設資料夾名稱去掉 .zip.001
         assert_eq!(dialogs::default_dest(&first), root.join("20261013"));
+        // 不是壓縮檔的分割檔（影片.mkv.001）：解出的就是一個檔案，預設放在同一個資料夾
+        assert_eq!(dialogs::default_dest(&root.join("影片.mkv.001")), root);
     }
 }
 

@@ -207,6 +207,17 @@ fn hash_command() {
     assert_eq!(run(tmp.path(), &["h", "不存在.txt"], "").status.code(), Some(2));
 }
 
+/// 不是壓縮檔的分割檔（影片.mkv.001）：列出一個檔案，格式顯示為分割檔
+#[test]
+fn list_split_plain_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::write(tmp.path().join("clip.mkv.001"), b"\x1aE\xdf\xa3 part one ").unwrap();
+    fs::write(tmp.path().join("clip.mkv.002"), b"part two").unwrap();
+    let o = run(tmp.path(), &["l", "clip.mkv.001"], "");
+    let t = text(&o);
+    assert!(o.status.success() && t.contains("格式：分割檔") && t.contains("clip.mkv"), "{t}");
+}
+
 /// -v 分割壓縮，再從 .001 解壓縮
 #[test]
 fn split_volumes() {
