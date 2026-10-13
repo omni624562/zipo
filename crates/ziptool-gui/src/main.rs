@@ -414,6 +414,8 @@ struct Watched {
     file: PathBuf,
     /// 上次確認時的大小與修改時間
     stamp: Option<(u64, Option<SystemTime>)>,
+    /// 壓縮檔的大小與修改時間（開啟時，或 Zipo 自己更新它之後）；不同代表被其他程式修改或取代
+    archive_stamp: Option<(u64, Option<SystemTime>)>,
     password: Option<String>,
 }
 
@@ -1342,7 +1344,7 @@ impl App {
             return;
         }
         self.watched.retain(|w| w.file != file);
-        self.watched.push(Watched { archive, entry, stamp: file_stamp(&file), file, password });
+        self.watched.push(Watched { archive_stamp: file_stamp(&archive), archive, entry, stamp: file_stamp(&file), file, password });
     }
 
     /// 每秒檢查一次開啟的檔案是否被修改；有修改時詢問是否存回（沒有其他對話框或工作時）
@@ -1364,6 +1366,18 @@ impl App {
         if let Some(i) = self.watched.iter().position(|w| file_stamp(&w.file) != w.stamp) {
             self.dialog = Some(Dialog::SaveBack(i));
         }
+    }
+
+    /// 壓縮檔在開啟這個檔案之後被其他程式修改或取代時，存回前要提醒的文字
+    fn save_back_warning(&self, i: usize) -> Option<String> {
+        let w = self.watched.get(i)?;
+        (file_stamp(&w.archive) != w.archive_stamp).then(|| {
+            F!(
+                "注意：開啟這個檔案之後，「{}」已被其他程式修改或取代。存回會寫進目前的這個壓縮檔。",
+                "Note: \"{}\" was changed or replaced by another program after this file was opened. Saving will write into the archive as it is now.",
+                file_name(&w.archive)
+            )
+        })
     }
 
     /// 回答存回詢問：記下目前的狀態（下次修改時再問），`save` 為真時更新壓縮檔
@@ -1447,6 +1461,12 @@ impl App {
                 && let Some(file) = &out.opened
             {
                 self.watch(archive.clone(), entry.clone(), file.clone(), password.clone());
+            }
+            // Zipo 自己更新了壓縮檔（存回、加入、刪除）：不算被其他程式取代
+            if let (Task::Update { archive, .. }, Ok(_)) = (&task, &res) {
+                for w in self.watched.iter_mut().filter(|w| &w.archive == archive) {
+                    w.archive_stamp = file_stamp(archive);
+                }
             }
             if let (Task::PrepareDrag { archive, entries, .. }, Ok(out)) = (&task, &res)
                 && !out.prepared.is_empty()
@@ -2456,6 +2476,10 @@ This version must be updated manually from the download page.", env!("CARGO_PKG_
                 });
                 ui.add_space(8.0);
                 ui.add(egui::Label::new(RichText::new(F!("「{name}」已在其他程式中修改並儲存。\n要把新版本更新到「{archive}」嗎？", "\"{name}\" was changed and saved in another program.\nUpdate \"{archive}\" with the new version?")).color(p.text)).wrap());
+                if let Some(warning) = self.save_back_warning(i) {
+                    ui.add_space(6.0);
+                    ui.add(egui::Label::new(RichText::new(warning).color(p.danger)).wrap());
+                }
                 ui.add_space(6.0);
                 let (mut save, mut skip) = (false, false);
                 ui.allocate_ui_with_layout(vec2(ui.available_width(), 32.0), Layout::right_to_left(Align::Center), |ui| {
@@ -2860,7 +2884,7 @@ impl App {
                     "preview" => self.preview_open = true,
                     "saveback" => {
                         let file = std::env::temp_dir().join("報告.docx");
-                        self.watched.push(Watched { archive: "專案資料.zip".into(), entry: "報告.docx".into(), file, stamp: None, password: None });
+                        self.watched.push(Watched { archive: "專案資料.zip".into(), entry: "報告.docx".into(), file, stamp: None, archive_stamp: None, password: None });
                         self.dialog = Some(Dialog::SaveBack(0));
                     }
                     "hash" => {
@@ -4120,6 +4144,19 @@ mod save_back_tests {
         app.find_modified();
         assert!(app.dialog.is_none());
         assert_eq!(content(&ar, "docs/report.txt"), ("v2".to_string(), 1));
+        // 自己存回、或在 Zipo 中修改壓縮檔：不算被取代
+        assert!(app.save_back_warning(0).is_none());
+
+        // 壓縮檔被其他程式換掉（同名的另一個檔案）：存回前提醒
+        std::fs::write(root.join("other.txt"), "其他").unwrap();
+        ziptool_core::compress(&[root.join("other.txt")], &ar, Format::Zip, &Default::default(), &ziptool_core::NoProgress).unwrap();
+        let f = std::fs::File::options().append(true).open(&ar).unwrap();
+        f.set_modified(SystemTime::now() + Duration::from_secs(40)).unwrap();
+        drop(f);
+        edit(&file, "v4", 30);
+        app.find_modified();
+        assert!(matches!(app.dialog, Some(Dialog::SaveBack(0))));
+        assert!(app.save_back_warning(0).is_some_and(|m| m.contains("e.zip")));
     }
 }
 
