@@ -44,6 +44,8 @@
 | 上一層 | Alt+↑、Backspace |
 | 上一頁／下一頁 | Alt+←／Alt+→ |
 | 全選 | Ctrl+A |
+| 複製到剪貼簿（可在檔案總管貼上） | Ctrl+C |
+| 把剪貼簿上的檔案加入開啟中的壓縮檔 | Ctrl+V |
 | 延伸選取 | Shift+↑／↓／Home／End、Shift+按一下 |
 | 加選 | Ctrl+按一下 |
 | 搜尋 | Ctrl+F、F3 |

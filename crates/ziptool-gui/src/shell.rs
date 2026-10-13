@@ -288,6 +288,100 @@ pub fn collect_in(queue: &Path, mutex: &str, paths: Vec<PathBuf>, quiet: std::ti
     Some(all)
 }
 
+/// 剪貼簿的「檔案清單」格式（與檔案總管的複製、貼上相同）
+#[cfg(windows)]
+const CF_HDROP: u32 = 15;
+
+/// DROPFILES 結構加上以 0 分隔、兩個 0 結尾的 UTF-16 路徑
+#[cfg(windows)]
+fn dropfiles_bytes(paths: &[PathBuf]) -> Vec<u8> {
+    use std::os::windows::ffi::OsStrExt;
+    const HEADER: u32 = 20; // pFiles、pt（x、y）、fNC、fWide 各 4 位元組
+    let mut out = Vec::new();
+    for v in [HEADER, 0, 0, 0, 1] {
+        out.extend(v.to_le_bytes());
+    }
+    for p in paths {
+        out.extend(p.as_os_str().encode_wide().chain([0]).flat_map(u16::to_le_bytes));
+    }
+    out.extend([0, 0]);
+    out
+}
+
+/// 讀出 HDROP 中的所有路徑
+#[cfg(windows)]
+fn hdrop_paths(h: windows::Win32::UI::Shell::HDROP) -> Vec<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows::Win32::UI::Shell::DragQueryFileW;
+    // SAFETY: h 是有效的 HDROP；緩衝區長度依查詢到的長度配置
+    unsafe {
+        (0..DragQueryFileW(h, u32::MAX, None))
+            .map(|i| {
+                let mut buf = vec![0u16; DragQueryFileW(h, i, None) as usize + 1];
+                let n = DragQueryFileW(h, i, Some(&mut buf)) as usize;
+                PathBuf::from(std::ffi::OsString::from_wide(&buf[..n]))
+            })
+            .collect()
+    }
+}
+
+/// 把檔案放到剪貼簿（之後可以在檔案總管貼上）
+#[cfg(windows)]
+pub fn copy_files(paths: &[PathBuf]) -> std::io::Result<()> {
+    use windows::Win32::Foundation::{GlobalFree, HANDLE};
+    use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
+    use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
+    let bytes = dropfiles_bytes(paths);
+    // SAFETY: 配置的記憶體大小與寫入的內容相同；成功交給剪貼簿後由系統管理，失敗時自行釋放
+    unsafe {
+        let mem = GlobalAlloc(GMEM_MOVEABLE, bytes.len())?;
+        let ptr = GlobalLock(mem) as *mut u8;
+        if ptr.is_null() {
+            let _ = GlobalFree(Some(mem));
+            return Err(std::io::Error::last_os_error());
+        }
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+        let _ = GlobalUnlock(mem);
+        if let Err(e) = OpenClipboard(None) {
+            let _ = GlobalFree(Some(mem));
+            return Err(e.into());
+        }
+        let r = EmptyClipboard().and_then(|()| SetClipboardData(CF_HDROP, Some(HANDLE(mem.0))));
+        let _ = CloseClipboard();
+        if let Err(e) = r {
+            let _ = GlobalFree(Some(mem));
+            return Err(e.into());
+        }
+    }
+    Ok(())
+}
+
+/// 剪貼簿上的檔案（在檔案總管按「複製」的檔案）；沒有時為空
+#[cfg(windows)]
+pub fn clipboard_files() -> Vec<PathBuf> {
+    use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard};
+    use windows::Win32::UI::Shell::HDROP;
+    // SAFETY: 開啟剪貼簿期間讀取，讀完立即關閉
+    unsafe {
+        if IsClipboardFormatAvailable(CF_HDROP).is_err() || OpenClipboard(None).is_err() {
+            return Vec::new();
+        }
+        let files = GetClipboardData(CF_HDROP).map(|h| hdrop_paths(HDROP(h.0))).unwrap_or_default();
+        let _ = CloseClipboard();
+        files
+    }
+}
+
+#[cfg(not(windows))]
+pub fn copy_files(_paths: &[PathBuf]) -> std::io::Result<()> {
+    Err(std::io::Error::other(L!("只支援 Windows", "Only supported on Windows")))
+}
+
+#[cfg(not(windows))]
+pub fn clipboard_files() -> Vec<PathBuf> {
+    Vec::new()
+}
+
 #[cfg(not(windows))]
 pub fn collect(_kind: &str, paths: Vec<PathBuf>) -> Option<Vec<PathBuf>> {
     Some(paths)
@@ -421,6 +515,25 @@ mod tests {
         // 只有一個：照常使用自己的路徑
         let one = collect_in(&queue, &name, vec![t.path().join("x")], std::time::Duration::from_millis(50));
         assert_eq!(one, Some(vec![t.path().join("x")]));
+    }
+
+    /// 放到剪貼簿的檔案清單，Windows 自己（DragQueryFileW）讀得出同樣的路徑；不動到真正的剪貼簿
+    #[test]
+    fn dropfiles_are_readable_by_windows() {
+        use windows::Win32::Foundation::GlobalFree;
+        use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
+        let paths = vec![std::path::PathBuf::from(r"C:\資料\報告.docx"), std::path::PathBuf::from(r"D:\a b\c.txt")];
+        let bytes = dropfiles_bytes(&paths);
+        // SAFETY: 測試用的記憶體，大小與內容一致，用完釋放
+        unsafe {
+            let mem = GlobalAlloc(GMEM_MOVEABLE, bytes.len()).unwrap();
+            let ptr = GlobalLock(mem) as *mut u8;
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+            let _ = GlobalUnlock(mem);
+            let got = hdrop_paths(windows::Win32::UI::Shell::HDROP(mem.0));
+            let _ = GlobalFree(Some(mem));
+            assert_eq!(got, paths);
+        }
     }
 
     /// 預設程式註冊同樣寫到測試機碼，驗證後整個刪除。

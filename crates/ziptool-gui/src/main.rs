@@ -2202,6 +2202,20 @@ impl App {
         if alt_up {
             return self.go_up();
         }
+        // Ctrl+C：選取的項目放到剪貼簿；Ctrl+V：在壓縮檔內加入剪貼簿上的檔案。
+        // egui 把按下 Ctrl+C 轉成複製事件；按下 Ctrl+V 時剪貼簿沒有文字（只有檔案）就什麼都不送，所以改看放開 V 的事件
+        let (copy, paste) = ctx.input(|i| {
+            (
+                i.events.iter().any(|e| matches!(e, egui::Event::Copy)),
+                i.events.iter().any(|e| matches!(e, egui::Event::Key { key: Key::V, pressed: false, modifiers, .. } if modifiers.command)),
+            )
+        });
+        if copy {
+            return self.copy_selection();
+        }
+        if paste {
+            return self.paste_files(shell::clipboard_files());
+        }
         if find {
             return ctx.memory_mut(|m| m.request_focus(egui::Id::new(SEARCH_BOX)));
         }
@@ -2279,6 +2293,57 @@ impl App {
             }
             self.cursor = Some(next);
             self.scroll_to = Some(next);
+        }
+    }
+
+    /// 選取的項目放到剪貼簿；壓縮檔內的項目先解到暫存資料夾（Zipo 關閉後仍可貼上，一天後清除）
+    fn copy_selection(&mut self) {
+        if self.sel.is_empty() {
+            return;
+        }
+        let files: Vec<PathBuf> = match self.loc.clone() {
+            Location::Archive { path, inner } => {
+                let size: u64 = self.selected_rows().iter().filter_map(|r| r.size).sum();
+                if size > DRAG_OUT_MAX {
+                    return self.notice(L!("複製", "Copy"), F!("選取的項目超過 {}，請改用「解壓縮」。", "The selection is larger than {}; use Extract instead.", ziptool_core::format_size(DRAG_OUT_MAX)));
+                }
+                let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+                let dir = std::env::temp_dir().join("Zipo").join(format!("clip-{}-{stamp}", std::process::id()));
+                let entries: Vec<String> = self.selected_rows().iter().map(|r| self.inner_name(r)).collect();
+                let password = self.cache.as_ref().and_then(|c| c.password.clone());
+                let opts = ziptool_core::ExtractOptions { password, selection: Some(entries), strip_prefix: inner.clone(), max_bytes: Some(DRAG_OUT_MAX), ..Default::default() };
+                match ziptool_core::extract(&path, &dir, &opts, &ziptool_core::NoProgress) {
+                    Ok(r) if r.issues.is_empty() => std::fs::read_dir(&dir).map(|d| d.flatten().map(|e| e.path()).collect()).unwrap_or_default(),
+                    Ok(r) => {
+                        let _ = std::fs::remove_dir_all(&dir);
+                        let i = &r.issues[0];
+                        return self.notice(L!("無法複製", "Cannot copy"), F!("{}：{}", "{}: {}", i.name, i.reason));
+                    }
+                    Err(e @ (Error::PasswordRequired | Error::WrongPassword)) => {
+                        let _ = std::fs::remove_dir_all(&dir);
+                        // 輸入密碼後重新讀取壓縮檔，之後再按一次 Ctrl+C 即可
+                        self.dialog = Some(Dialog::Password(PasswordDialog::new(PasswordPurpose::Open { path: path.clone(), inner }, file_name(&path), matches!(e, Error::WrongPassword))));
+                        return;
+                    }
+                    Err(e) => {
+                        let _ = std::fs::remove_dir_all(&dir);
+                        return self.notice(L!("無法複製", "Cannot copy"), e.to_string());
+                    }
+                }
+            }
+            _ => self.selected_rows().iter().filter(|r| !r.is_drive).filter_map(|r| self.row_path(r)).collect(),
+        };
+        if !files.is_empty()
+            && let Err(e) = shell::copy_files(&files)
+        {
+            self.notice(L!("無法複製", "Cannot copy"), ziptool_core::describe(&e));
+        }
+    }
+
+    /// 貼上：壓縮檔內加入剪貼簿上的檔案（先確認）；資料夾中不處理（Zipo 不搬移電腦上的檔案）
+    fn paste_files(&mut self, files: Vec<PathBuf>) {
+        if !files.is_empty() && matches!(self.loc, Location::Archive { .. }) {
+            self.confirm_add_into_archive(files);
         }
     }
 
@@ -3425,6 +3490,13 @@ mod phase3_tests {
         // Ctrl+F：游標移到搜尋框
         press(&mut app, Key::F, Modifiers::COMMAND);
         assert_eq!(ctx.memory(|m| m.focused()), Some(egui::Id::new(SEARCH_BOX)));
+        ctx.memory_mut(|m| m.surrender_focus(egui::Id::new(SEARCH_BOX)));
+
+        // Ctrl+V：egui 只送出「放開 V」的事件（剪貼簿沒有文字時）；在資料夾中不做任何事，也不出錯
+        let release = egui::Event::Key { key: Key::V, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::COMMAND };
+        let mut out = ctx.run_ui(egui::RawInput { events: vec![egui::Event::ModifiersChanged(Modifiers::COMMAND), release], ..Default::default() }, |ui| app.keyboard(ui.ctx()));
+        out.textures_delta.clear();
+        assert!(app.dialog.is_none());
     }
 
     #[test]
@@ -4219,6 +4291,22 @@ mod drag_out_tests {
             frame(&mut app, vec![egui::Event::PointerGone]);
             assert_eq!(app.sort_key, key, "x = {x}");
         }
+    }
+
+    /// 貼上剪貼簿上的檔案：壓縮檔內詢問是否加入；資料夾中不處理
+    #[test]
+    fn paste_adds_into_open_archive() {
+        let t = tempfile::tempdir().unwrap();
+        let root = real_path(t.path());
+        let (mut app, _ctx) = archive_in_docs(&root, None);
+        let f = root.join("新檔.txt");
+        std::fs::write(&f, "x").unwrap();
+        app.paste_files(vec![f.clone()]);
+        assert!(matches!(&app.dialog, Some(Dialog::ConfirmUpdate { message, .. }) if message.contains("新檔.txt")));
+        app.dialog = None;
+        app.navigate(Location::Dir(root.clone()));
+        app.paste_files(vec![f]);
+        assert!(app.dialog.is_none());
     }
 
     #[test]
