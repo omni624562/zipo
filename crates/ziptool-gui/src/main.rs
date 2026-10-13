@@ -130,7 +130,14 @@ fn run_app() -> eframe::Result {
                 .ok_or_else(|| L!("找不到可用的顯示卡", "No usable graphics adapter was found").to_string())
         }));
     }
-    let start = parse_args(std::env::args_os().skip(1).collect());
+    let start = match parse_args(std::env::args_os().skip(1).collect()) {
+        // 檔案總管選取多個檔案時每個各啟動一個 Zipo：合併成一個對話框，其餘直接結束
+        StartAction::Add(paths) => match shell::collect_add(paths) {
+            Some(all) => StartAction::Add(all),
+            None => return Ok(()),
+        },
+        other => other,
+    };
     eframe::run_native(
         // 設定儲存名稱維持舊名，保留使用者原有的設定
         "ZipTool",

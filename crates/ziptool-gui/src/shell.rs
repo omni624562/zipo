@@ -7,7 +7,7 @@
 #![cfg_attr(not(windows), allow(dead_code))]
 
 use ziptool_core::L;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// 實際使用的位置；測試時改用其他機碼，不影響真實設定。
 pub const ROOT: &str = r"Software\Classes";
@@ -182,6 +182,117 @@ fn notify_assoc_changed() {
     unsafe { SHChangeNotify(SHCNE_ASSOCCHANGED, 0, std::ptr::null(), std::ptr::null()) };
 }
 
+/// 在檔案總管選取多個檔案執行「加入壓縮檔」時，Windows 會每個檔案各啟動一個 Zipo。
+/// 第一個啟動的負責收集，其他的把路徑交給它後結束，最後只開一個對話框、包含全部檔案。
+/// 回傳 `None` 代表路徑已交給另一個 Zipo，這個應直接結束。
+pub fn collect_add(paths: Vec<PathBuf>) -> Option<Vec<PathBuf>> {
+    let queue = std::env::temp_dir().join("Zipo").join("add-queue");
+    collect_add_in(&queue, r"Local\Zipo.AddCollector", paths, std::time::Duration::from_millis(400))
+}
+
+/// 路徑以 UTF-16 存放（Windows 的檔名可能不是有效的 UTF-8），每個以 0 結尾
+#[cfg(windows)]
+fn encode_paths(paths: &[PathBuf]) -> Vec<u8> {
+    use std::os::windows::ffi::OsStrExt;
+    paths.iter().flat_map(|p| p.as_os_str().encode_wide().chain([0])).flat_map(u16::to_le_bytes).collect()
+}
+
+#[cfg(windows)]
+fn decode_paths(bytes: &[u8]) -> Vec<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    let wide: Vec<u16> = bytes.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
+    wide.split(|&c| c == 0).filter(|p| !p.is_empty()).map(|p| PathBuf::from(std::ffi::OsString::from_wide(p))).collect()
+}
+
+/// `queue`：放路徑的資料夾；`mutex`：收集者的具名 mutex（行程結束時自動釋放）；
+/// `quiet`：這段時間內沒有新的路徑就停止收集（最多 3 秒）
+#[cfg(windows)]
+pub fn collect_add_in(queue: &Path, mutex: &str, paths: Vec<PathBuf>, quiet: std::time::Duration) -> Option<Vec<PathBuf>> {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::{Duration, Instant, SystemTime};
+    use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError};
+    use windows::Win32::System::Threading::CreateMutexW;
+    use windows::core::PCWSTR;
+    static SEQ: AtomicU32 = AtomicU32::new(0);
+    if std::fs::create_dir_all(queue).is_err() {
+        return Some(paths);
+    }
+    // 先放進佇列（寫完才改名，讀取時不會看到寫一半的檔案），再確認有沒有收集者：
+    // 收集者停止收集後還會再讀一次佇列，所以不會漏掉
+    let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let base = format!("{}-{stamp}-{}", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed));
+    let mine = queue.join(format!("{base}.paths"));
+    let tmp = queue.join(format!("{base}.tmp"));
+    if std::fs::write(&tmp, encode_paths(&paths)).and_then(|()| std::fs::rename(&tmp, &mine)).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return Some(paths);
+    }
+    let name: Vec<u16> = mutex.encode_utf16().chain([0]).collect();
+    // SAFETY: 名稱為以 0 結尾的 UTF-16 字串；建立後立即讀取錯誤碼
+    let (handle, exists) = unsafe {
+        let h = CreateMutexW(None, false, PCWSTR(name.as_ptr()));
+        (h, GetLastError() == ERROR_ALREADY_EXISTS)
+    };
+    let Ok(handle) = handle else {
+        let _ = std::fs::remove_file(&mine);
+        return Some(paths);
+    };
+    if exists {
+        // SAFETY: 關閉自己取得的控制代碼
+        unsafe {
+            let _ = CloseHandle(handle);
+        }
+        return None;
+    }
+    // 收集：超過一分鐘的是之前異常結束留下的，不採用
+    let fresh = |e: &std::fs::DirEntry| e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|d| d < Duration::from_secs(60));
+    let pending = || -> Vec<std::fs::DirEntry> {
+        let mut v: Vec<_> = std::fs::read_dir(queue).map(|d| d.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "paths")).collect()).unwrap_or_default();
+        v.sort_by_key(|e| e.file_name());
+        v
+    };
+    let started = Instant::now();
+    let (mut count, mut changed) = (pending().len(), Instant::now());
+    while changed.elapsed() < quiet && started.elapsed() < Duration::from_secs(3) {
+        std::thread::sleep(Duration::from_millis(30));
+        let n = pending().len();
+        if n != count {
+            (count, changed) = (n, Instant::now());
+        }
+    }
+    // SAFETY: 關閉自己建立的 mutex；之後才啟動的會成為新的收集者
+    unsafe {
+        let _ = CloseHandle(handle);
+    }
+    let mut all = Vec::new();
+    for e in pending() {
+        if fresh(&e)
+            && let Ok(bytes) = std::fs::read(e.path())
+        {
+            all.extend(decode_paths(&bytes));
+        }
+        let _ = std::fs::remove_file(e.path());
+    }
+    // 自己的路徑已被前一個收集者取走（交接的瞬間）：由它處理
+    if all.is_empty() {
+        return None;
+    }
+    all.sort();
+    all.dedup();
+    Some(all)
+}
+
+#[cfg(not(windows))]
+pub fn collect_add(paths: Vec<PathBuf>) -> Option<Vec<PathBuf>> {
+    Some(paths)
+}
+
+#[cfg(not(windows))]
+#[cfg_attr(test, allow(dead_code))]
+pub fn collect_add_in(_queue: &Path, _mutex: &str, paths: Vec<PathBuf>, _quiet: std::time::Duration) -> Option<Vec<PathBuf>> {
+    Some(paths)
+}
+
 #[cfg(not(windows))]
 pub fn register_default(_base: &str, _exe: &Path) -> std::io::Result<()> {
     Err(std::io::Error::other(L!("只支援 Windows", "Only supported on Windows")))
@@ -271,6 +382,35 @@ mod tests {
         assert!(!is_default_registered(&base));
         let _ = hkcu.delete_subkey_all(&root);
         let _ = hkcu.delete_subkey_all(&base);
+    }
+
+    /// 檔案總管選取多個檔案「加入壓縮檔」時同時啟動多個 Zipo：只有一個收集到全部路徑，其餘直接結束
+    #[test]
+    fn simultaneous_add_requests_are_merged() {
+        let t = tempfile::tempdir().unwrap();
+        let queue = t.path().join("queue");
+        let name = format!(r"Local\ZipoAddTest-{}", std::process::id());
+        let names = ["c.txt", "a.txt", "資料夾 b"];
+        let results: Vec<Option<Vec<std::path::PathBuf>>> = std::thread::scope(|s| {
+            let handles: Vec<_> = names
+                .iter()
+                .map(|n| {
+                    let (queue, name, p) = (queue.clone(), name.clone(), t.path().join(n));
+                    s.spawn(move || collect_add_in(&queue, &name, vec![p], std::time::Duration::from_millis(300)))
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let got: Vec<_> = results.into_iter().flatten().collect();
+        assert_eq!(got.len(), 1, "只能有一個開啟對話框：{got:?}");
+        let mut want: Vec<_> = names.iter().map(|n| t.path().join(n)).collect();
+        want.sort();
+        assert_eq!(got[0], want);
+        assert_eq!(std::fs::read_dir(&queue).unwrap().count(), 0, "佇列應清空");
+
+        // 只有一個：照常使用自己的路徑
+        let one = collect_add_in(&queue, &name, vec![t.path().join("x")], std::time::Duration::from_millis(50));
+        assert_eq!(one, Some(vec![t.path().join("x")]));
     }
 
     /// 預設程式註冊同樣寫到測試機碼，驗證後整個刪除。
