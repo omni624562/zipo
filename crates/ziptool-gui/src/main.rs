@@ -173,6 +173,9 @@ fn run_app() -> eframe::Result {
     )
 }
 
+/// 搜尋框的 id（Ctrl+F 把游標移到這裡）
+const SEARCH_BOX: &str = "search_box";
+
 /// 從命令列（例如檔案總管右鍵選單）啟動時要做的事。
 #[derive(Debug, PartialEq)]
 enum StartAction {
@@ -543,6 +546,8 @@ struct App {
     history_nav: bool,
     /// 網址列切換成可直接輸入路徑
     addr_editing: bool,
+    /// Shift+方向鍵延伸選取時，移動的那一端
+    cursor: Option<usize>,
     /// 直接打字跳到檔案
     typeahead: String,
     typeahead_at: std::time::Instant,
@@ -609,6 +614,7 @@ impl App {
             forward: Vec::new(),
             history_nav: false,
             addr_editing: false,
+            cursor: None,
             typeahead: String::new(),
             typeahead_at: std::time::Instant::now(),
             add_format: Format::Zip,
@@ -1847,7 +1853,7 @@ impl App {
             if ui.add_enabled_ui(!self.forward.is_empty(), |ui| icon_button(ui, icon::ARROW_RIGHT)).inner.on_hover_text(L!("下一頁（Alt+→）", "Forward (Alt+→)")).clicked() {
                 self.go_forward();
             }
-            if ui.add_enabled_ui(self.loc.parent().is_some(), |ui| icon_button(ui, icon::ARROW_UP)).inner.on_hover_text(L!("上一層（Backspace）", "Up (Backspace)")).clicked() {
+            if ui.add_enabled_ui(self.loc.parent().is_some(), |ui| icon_button(ui, icon::ARROW_UP)).inner.on_hover_text(L!("上一層（Alt+↑）", "Up (Alt+Up)")).clicked() {
                 self.go_up();
             }
             ui.add_space(4.0);
@@ -1856,6 +1862,7 @@ impl App {
                     input_frame(ui, icon::MAGNIFYING_GLASS, |ui| {
                         let r = ui.add(
                             egui::TextEdit::singleline(&mut self.filter)
+                                .id(egui::Id::new(SEARCH_BOX))
                                 .frame(egui::Frame::NONE)
                                 .hint_text(if matches!(self.loc, Location::Archive { .. }) { F!("搜尋 {here}（含子資料夾）", "Search {here} (including subfolders)") } else { F!("搜尋 {here}", "Search {here}") })
                                 .desired_width(ui.available_width()),
@@ -2184,6 +2191,25 @@ impl App {
             return;
         }
         let (alt_left, alt_right) = ctx.input(|i| (i.modifiers.alt && i.key_pressed(Key::ArrowLeft), i.modifiers.alt && i.key_pressed(Key::ArrowRight)));
+        // 與檔案總管相同：Alt+↑ 上一層、Ctrl+F／F3 搜尋、Ctrl+L／Alt+D 網址列
+        let (alt_up, find, address) = ctx.input(|i| {
+            (
+                i.modifiers.alt && i.key_pressed(Key::ArrowUp),
+                (i.modifiers.command && i.key_pressed(Key::F)) || i.key_pressed(Key::F3),
+                (i.modifiers.command && i.key_pressed(Key::L)) || (i.modifiers.alt && i.key_pressed(Key::D)),
+            )
+        });
+        if alt_up {
+            return self.go_up();
+        }
+        if find {
+            return ctx.memory_mut(|m| m.request_focus(egui::Id::new(SEARCH_BOX)));
+        }
+        if address {
+            self.addr = self.loc.display();
+            self.addr_editing = true;
+            return;
+        }
         if ctx.input(|i| i.key_pressed(Key::Delete)) && matches!(self.loc, Location::Archive { .. }) && !self.sel.is_empty() {
             return self.cmd_delete();
         }
@@ -2217,6 +2243,7 @@ impl App {
             }
             return;
         }
+        let shift = ctx.input(|i| i.modifiers.shift);
         let (enter, back, all, f5, up, down, home, end) = ctx.input(|i| {
             (
                 i.key_pressed(Key::Enter),
@@ -2239,11 +2266,18 @@ impl App {
             self.refresh();
         } else if !self.rows.is_empty() && (up || down || home || end) {
             let last = self.rows.len() - 1;
-            let cur = self.anchor.unwrap_or(0);
+            // Shift：從起點（anchor）延伸到移動後的位置；移動的一端記在 cursor（仍在選取範圍內才有效）
+            let cur = self.cursor.filter(|c| self.sel.contains(c)).or(self.anchor).unwrap_or(0);
             let next = if home { 0 } else if end { last } else if up { cur.saturating_sub(1) } else { (cur + 1).min(last) };
             let next = if self.sel.is_empty() && (up || down) { 0 } else { next };
-            self.sel = [next].into();
-            self.anchor = Some(next);
+            match self.anchor {
+                Some(a) if shift && !self.sel.is_empty() => self.sel = (a.min(next)..=a.max(next)).collect(),
+                _ => {
+                    self.sel = [next].into();
+                    self.anchor = Some(next);
+                }
+            }
+            self.cursor = Some(next);
             self.scroll_to = Some(next);
         }
     }
@@ -3356,6 +3390,44 @@ mod phase3_tests {
         let raw = egui::RawInput { events: vec![egui::Event::Text(text.into())], ..Default::default() };
         let mut out = ctx.run_ui(raw, |ui| app.keyboard(ui.ctx()));
         out.textures_delta.clear();
+    }
+
+    /// 與檔案總管相同的快捷鍵：Shift+方向鍵延伸選取、Alt+↑ 上一層、Ctrl+F 搜尋、Ctrl+L 網址列
+    #[test]
+    fn explorer_keyboard_shortcuts() {
+        let t = tree();
+        let root = real_path(t.path());
+        let ctx = egui::Context::default();
+        let mut app = App::new(Some(root.join("sub")));
+        let press = |app: &mut App, key: Key, modifiers: Modifiers| {
+            let ev = egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+            let raw = egui::RawInput { events: vec![egui::Event::ModifiersChanged(modifiers), ev], ..Default::default() };
+            let mut out = ctx.run_ui(raw, |ui| app.keyboard(ui.ctx()));
+            out.textures_delta.clear();
+        };
+        // Alt+↑：上一層
+        press(&mut app, Key::ArrowUp, Modifiers::ALT);
+        assert_eq!(app.loc, Location::Dir(root.clone()));
+        // Shift+↓：從目前的項目往下延伸；Shift+↑ 縮回
+        app.sel = [0].into();
+        app.anchor = Some(0);
+        press(&mut app, Key::ArrowDown, Modifiers::SHIFT);
+        press(&mut app, Key::ArrowDown, Modifiers::SHIFT);
+        assert_eq!(app.sel, [0, 1, 2].into());
+        press(&mut app, Key::ArrowUp, Modifiers::SHIFT);
+        assert_eq!(app.sel, [0, 1].into());
+        press(&mut app, Key::End, Modifiers::SHIFT);
+        assert_eq!(app.sel.len(), app.rows.len());
+        // 沒按 Shift：回到單一選取
+        press(&mut app, Key::Home, Modifiers::NONE);
+        assert_eq!(app.sel, [0].into());
+        // Ctrl+L：網址列可直接輸入
+        press(&mut app, Key::L, Modifiers::COMMAND);
+        assert!(app.addr_editing);
+        app.addr_editing = false;
+        // Ctrl+F：游標移到搜尋框
+        press(&mut app, Key::F, Modifiers::COMMAND);
+        assert_eq!(ctx.memory(|m| m.focused()), Some(egui::Id::new(SEARCH_BOX)));
     }
 
     #[test]
