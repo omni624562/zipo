@@ -1,6 +1,7 @@
 //! Zipo 核心：以 7-Zip 的功能為藍本，提供壓縮、解壓縮、列出內容與測試完整性。
 //! CLI 與 GUI 共用此 crate。
 
+mod filter;
 mod format;
 mod hash;
 pub mod i18n;
@@ -16,6 +17,7 @@ mod zip_fmt;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+pub use filter::{Filter, Pattern};
 pub use format::Format;
 pub use hash::{Hashes, hash_files, hash_reader};
 pub use progress::{NoProgress, OverwriteAnswer, Progress};
@@ -115,6 +117,8 @@ pub struct CompressOptions {
     pub encrypt_names: bool,
     /// 分割大小（位元組）；設定時產生 `名稱.001`、`名稱.002`…（與 7-Zip 的 `-v` 相同）
     pub volume_size: Option<u64>,
+    /// 只加入符合的項目（7-Zip 的 `-i`／`-x`）；名稱為壓縮檔內的路徑
+    pub filter: Filter,
 }
 
 /// 目的檔已存在時的處理方式；對應 7-Zip 的 `-aoa`／`-aos`／`-aou`。
@@ -144,6 +148,8 @@ pub struct ExtractOptions {
     pub allow_high_ratio: bool,
     /// 最多寫出的位元組數（預覽、拖曳等只需要小檔案的用途）；依實際寫出的量計算，不採信壓縮檔宣告的大小
     pub max_bytes: Option<u64>,
+    /// 只解出符合的項目（7-Zip 的 `-i`／`-x`），與 `selection` 同時成立
+    pub filter: Filter,
 }
 
 /// 除錯輸出不顯示密碼本身，避免被記錄到日誌或錯誤報告中
@@ -158,6 +164,7 @@ impl std::fmt::Debug for CompressOptions {
             .field("password", &format_args!("{}", redacted(&self.password)))
             .field("encrypt_names", &self.encrypt_names)
             .field("volume_size", &self.volume_size)
+            .field("filter", &self.filter)
             .finish()
     }
 }
@@ -172,6 +179,7 @@ impl std::fmt::Debug for ExtractOptions {
             .field("flatten", &self.flatten)
             .field("allow_high_ratio", &self.allow_high_ratio)
             .field("max_bytes", &self.max_bytes)
+            .field("filter", &self.filter)
             .finish()
     }
 }
@@ -244,7 +252,7 @@ pub fn compress(
     if opts.encrypt_names && (format != Format::SevenZ || opts.password.is_none()) {
         return Err(Error::Unsupported(L!("加密檔名只適用於有設定密碼的 7z", "Encrypting file names only applies to 7z archives with a password").into()));
     }
-    let items = util::collect(inputs)?;
+    let items = util::collect(inputs, &opts.filter)?;
     if format.is_single() && (items.len() != 1 || items[0].is_dir) {
         return Err(Error::Unsupported(F!(
             "{} 只能壓縮單一檔案；多個檔案或資料夾請用 7z、zip 或 tar.{}", "{} can only compress a single file; use 7z, zip or tar.{} for multiple files or folders",
@@ -340,7 +348,7 @@ fn modify(
         return Err(Error::Unsupported(F!("{} 格式不支援密碼", "The {} format does not support passwords", format.name())));
     }
     let into = util::normalize_name(into);
-    let mut items = util::collect(add)?;
+    let mut items = util::collect(add, &opts.filter)?;
     if !into.is_empty() {
         for it in &mut items {
             it.name = format!("{into}/{}", it.name);

@@ -9,7 +9,7 @@ use std::process::ExitCode;
 use std::time::{Instant, SystemTime};
 
 use indicatif::{ProgressBar, ProgressStyle};
-use ziptool_core::{CompressOptions, Error, ExtractOptions, Format, Overwrite, OverwriteAnswer, Progress, format_size};
+use ziptool_core::{CompressOptions, Error, ExtractOptions, Filter, Format, Overwrite, OverwriteAnswer, Pattern, Progress, format_size};
 
 const HELP_ZH: &str = "\
 用法：zipo <指令> [<參數>...] <壓縮檔> [<檔案名稱>...]
@@ -20,6 +20,7 @@ const HELP_ZH: &str = "\
   e : 解壓縮，不含資料夾結構
   h : 計算檔案的雜湊值（CRC32、MD5、SHA-1、SHA-256），資料夾則計算其中每個檔案
   l : 列出內容
+  rn : 重新命名壓縮檔內的項目：依序寫出舊名稱、新名稱（可以多組；資料夾連同其中的內容）
   t : 測試完整性
   u : 更新壓縮檔（同 a）
   x : 解壓縮，保留完整路徑
@@ -30,12 +31,14 @@ const HELP_ZH: &str = "\
              避免以 - 開頭的檔名被當成參數，例如名為 -p123 的檔案變成密碼）
   -ao{a|s|u} : 同名檔處理：a 全部覆寫、s 略過、u 自動改名（未指定時逐一詢問）
   -bd      : 不顯示進度條
+  -i[r]!{名稱} : 只處理符合的項目，可用 * 與 ? 萬用字元；加 r 為每一層都比對，否則只比對最上層
+  -x[r]!{名稱} : 略過符合的項目（資料夾連同其中的內容），寫法同 -i
   -m{參數} : 壓縮方法參數，支援 -mx{0-9}（或 -mx={0-9}）、-mhe={on|off}、
              -mcp={字碼頁}（舊式 zip 的檔名編碼，例如 950＝Big5、936＝GBK；預設依系統）
   -o{資料夾} : 輸出資料夾
   -p{密碼} : 設定密碼；只寫 -p 則以互動方式輸入（建議：寫在命令列的密碼
              會被其他程式看到，也會留在命令歷程中）
-  -r       : 遞迴處理子資料夾（預設即為遞迴，可省略）
+  -r       : 檔案名稱中的萬用字元（例如 *.txt）也搜尋子資料夾；資料夾一律包含其中的內容
   -v{大小} : 分割成多個檔案，例如 -v100m、-v4g（產生 名稱.001、名稱.002…）；
              解壓縮時指定 名稱.001 即可
   -t{格式} : 壓縮檔格式：7z、zip、tar、tar.gz、tar.bz2、tar.xz、tar.zst、gzip、bzip2、xz、zstd
@@ -47,6 +50,9 @@ const HELP_ZH: &str = "\
   zipo e logs.tar.zst -o平面 logs/app.log logs/err.log
   zipo a backup.7z 新增的檔案.txt
   zipo d backup.7z 文件/舊資料
+  zipo a 專案.7z 專案 -xr!node_modules -xr!*.log
+  zipo x backup.7z *.jpg -r -o照片
+  zipo rn backup.7z 文件/舊.txt 文件/新.txt
   zipo l backup.7z
   zipo t backup.7z -p密碼
 ";
@@ -60,6 +66,7 @@ Usage: zipo <command> [<switches>...] <archive> [<file names>...]
   e : Extract files without folder structure
   h : Calculate file hashes (CRC32, MD5, SHA-1, SHA-256); for folders, every file inside
   l : List contents
+  rn : Rename items in archive: old name, then new name (several pairs allowed; folders with their contents)
   t : Test integrity
   u : Update archive (same as a)
   x : Extract files with full paths
@@ -70,13 +77,16 @@ Usage: zipo <command> [<switches>...] <archive> [<file names>...]
              such as *, so a file named like -p123 is not taken as a switch)
   -ao{a|s|u} : Existing files: a overwrite all, s skip, u auto rename (ask if not set)
   -bd      : Hide the progress bar
+  -i[r]!{name} : Only process matching items; * and ? wildcards allowed; with r every level is matched,
+             otherwise only the top level
+  -x[r]!{name} : Skip matching items (folders with their contents); same syntax as -i
   -m{param} : Compression parameters: -mx{0-9} (or -mx={0-9}), -mhe={on|off},
              -mcp={codepage} (file name encoding of old zips, e.g. 950 = Big5, 936 = GBK;
              system default if not set)
   -o{folder} : Output folder
   -p{password} : Set the password; -p alone asks for it interactively (recommended:
              passwords on the command line are visible to other programs and kept in history)
-  -r       : Recurse subfolders (the default; may be omitted)
+  -r       : Wildcards in file names (such as *.txt) also search subfolders; folders always include their contents
   -v{size} : Split into volumes, e.g. -v100m, -v4g (creates name.001, name.002…);
              extract by giving name.001
   -t{format} : Archive format: 7z, zip, tar, tar.gz, tar.bz2, tar.xz, tar.zst, gzip, bzip2, xz, zstd
@@ -88,6 +98,9 @@ Examples
   zipo e logs.tar.zst -oflat logs/app.log logs/err.log
   zipo a backup.7z new-file.txt
   zipo d backup.7z Documents/old
+  zipo a project.7z project -xr!node_modules -xr!*.log
+  zipo x backup.7z *.jpg -r -oPhotos
+  zipo rn backup.7z Documents/old.txt Documents/new.txt
   zipo l backup.7z
   zipo t backup.7z -pPassword
 ";
@@ -115,6 +128,7 @@ enum Cmd {
     Test,
     Info,
     Hash,
+    Rename,
 }
 
 #[derive(Debug, Default)]
@@ -136,6 +150,10 @@ struct Args {
     no_progress: bool,
     /// 分割大小（-v）
     volume: Option<u64>,
+    /// -i／-x 的篩選
+    filter: Filter,
+    /// -r：檔案名稱中的萬用字元也搜尋子資料夾
+    recurse: bool,
 }
 
 fn parse_format(s: &str) -> Option<Format> {
@@ -161,6 +179,7 @@ fn parse(argv: Vec<String>) -> Result<Args, String> {
         "t" => Cmd::Test,
         "i" => Cmd::Info,
         "h" => Cmd::Hash,
+        "rn" => Cmd::Rename,
         other => return Err(F!("不支援的指令：{other}", "Unsupported command: {other}")),
     });
     let mut only_files = false;
@@ -178,7 +197,7 @@ fn parse(argv: Vec<String>) -> Result<Args, String> {
         match lower.as_str() {
             "-" => only_files = true,
             "y" => a.yes = true,
-            "r" => {}
+            "r" => a.recurse = true,
             "bd" => a.no_progress = true,
             "aoa" => a.overwrite = Some(Overwrite::Overwrite),
             "aos" => a.overwrite = Some(Overwrite::Skip),
@@ -206,8 +225,26 @@ fn parse(argv: Vec<String>) -> Result<Args, String> {
             _ if lower.starts_with('t') => {
                 a.format = Some(parse_format(&sw[1..]).ok_or_else(|| F!("不支援的格式：{}", "Unsupported format: {}", &sw[1..]))?)
             }
+            // -x!名稱、-xr!名稱、-i!名稱、-ir!名稱
+            _ if lower.starts_with('x') || lower.starts_with('i') => {
+                let bad = || F!("不支援的參數：{arg}（寫法為 -x!名稱 或 -xr!名稱）", "Unsupported switch: {arg} (use -x!name or -xr!name)");
+                let (head, pat) = sw.split_once('!').ok_or_else(bad)?;
+                let recursive = match &lower[1..head.len()] {
+                    "" => false,
+                    "r" => true,
+                    _ => return Err(bad()),
+                };
+                if pat.is_empty() {
+                    return Err(bad());
+                }
+                let p = Pattern::new(pat, recursive);
+                if lower.starts_with('x') { a.filter.exclude.push(p) } else { a.filter.include.push(p) }
+            }
             _ => return Err(F!("不支援的參數：{arg}", "Unsupported switch: {arg}")),
         }
+    }
+    if a.cmd == Some(Cmd::Rename) && (a.files.is_empty() || a.files.len() % 2 != 0) {
+        return Err(L!("rn 指令需要成對的舊名稱與新名稱", "The rn command needs pairs of old and new names").into());
     }
     Ok(a)
 }
@@ -368,6 +405,7 @@ fn cmd_add(a: &Args) -> anyhow::Result<()> {
         archive.set_file_name(format!("{name}.{}", format.extension()));
     }
 
+    let mut filter = a.filter.clone();
     let inputs: Vec<PathBuf> = if a.files.is_empty() {
         // 與 7-Zip 相同：未指定檔案時加入目前資料夾的所有內容
         let me = std::fs::canonicalize(&archive).ok();
@@ -376,14 +414,41 @@ fn cmd_add(a: &Args) -> anyhow::Result<()> {
             .filter(|p| std::fs::canonicalize(p).ok() != me)
             .collect()
     } else {
-        a.files.iter().map(PathBuf::from).collect()
+        let mut v = Vec::new();
+        for f in &a.files {
+            if !f.contains(['*', '?']) {
+                v.push(PathBuf::from(f));
+                continue;
+            }
+            // 萬用字元：與 7-Zip 相同，比對資料夾中的名稱；加 -r 時每一層都比對（保留資料夾結構）
+            let p = Path::new(f);
+            let dir = p.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+            let pat = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let me = std::fs::canonicalize(&archive).ok();
+            let only = Filter { include: vec![Pattern::new(&pat, false)], ..Default::default() };
+            for e in std::fs::read_dir(dir)?.filter_map(|e| e.ok()) {
+                if std::fs::canonicalize(e.path()).ok() == me {
+                    continue;
+                }
+                if a.recurse || only.allows(&e.file_name().to_string_lossy()) {
+                    v.push(e.path());
+                }
+            }
+            if a.recurse {
+                filter.include.push(Pattern::new(&pat, true));
+            }
+        }
+        if v.is_empty() {
+            anyhow::bail!("{}", F!("沒有符合的檔案：{}", "No matching files: {}", a.files.join(" ")));
+        }
+        v
     };
 
     let password = match &a.password {
         Some(p) if p.is_empty() => Some(prompt_password(true)?),
         other => other.clone(),
     };
-    let opts = CompressOptions { level: a.level, password, encrypt_names: a.encrypt_names, volume_size: a.volume };
+    let opts = CompressOptions { level: a.level, password, encrypt_names: a.encrypt_names, volume_size: a.volume, filter };
 
     let bar = Bar::new(a.no_progress);
     if archive.exists() && a.volume.is_some() {
@@ -428,8 +493,33 @@ fn cmd_delete(a: &Args) -> anyhow::Result<()> {
     };
     println!("{}", F!("正在從 {} 刪除 {} 個項目", "Deleting {1} item(s) from {0}", archive.display(), a.files.len()));
     let bar = Bar::new(a.no_progress);
-    let opts = CompressOptions { level: a.level, password, encrypt_names: false, volume_size: None };
+    let opts = CompressOptions { level: a.level, password, encrypt_names: false, volume_size: None, filter: Filter::default() };
     ziptool_core::update(archive, &[], "", &a.files, &opts, &bar)?;
+    bar.0.finish_and_clear();
+    println!("{}", F!("一切正常", "Everything is OK"));
+    Ok(())
+}
+
+/// 解壓縮與列出時，指定的檔案名稱與 -i 相同（可用萬用字元；加 -r 時每一層都比對）
+fn name_filter(a: &Args) -> Filter {
+    let mut f = a.filter.clone();
+    f.include.extend(a.files.iter().map(|n| Pattern::new(n, a.recurse)));
+    f
+}
+
+/// 與 7z 的 rn 指令相同：成對的舊名稱、新名稱
+fn cmd_rename(a: &Args) -> anyhow::Result<()> {
+    let archive = archive_path(a)?;
+    let password = match &a.password {
+        Some(p) if p.is_empty() => Some(prompt_password(false)?),
+        other => other.clone(),
+    };
+    println!("{}", F!("正在重新命名 {} 中的 {} 個項目", "Renaming {1} item(s) in {0}", archive.display(), a.files.len() / 2));
+    let bar = Bar::new(a.no_progress);
+    let opts = CompressOptions { level: a.level, password, ..Default::default() };
+    for [from, to] in a.files.as_chunks::<2>().0 {
+        ziptool_core::rename(archive, from, to, &opts, &bar)?;
+    }
     bar.0.finish_and_clear();
     println!("{}", F!("一切正常", "Everything is OK"));
     Ok(())
@@ -449,11 +539,12 @@ fn cmd_extract(a: &Args, flatten: bool) -> anyhow::Result<()> {
             let opts = ExtractOptions {
                 password: pw.map(String::from),
                 overwrite,
-                selection: (!a.files.is_empty()).then(|| a.files.clone()),
+                selection: None,
                 strip_prefix: String::new(),
                 flatten,
                 allow_high_ratio,
                 max_bytes: None,
+                filter: name_filter(a),
             };
             ziptool_core::extract(archive, &dest, &opts, &bar)
         });
@@ -518,7 +609,9 @@ fn cmd_hash(a: &Args) -> anyhow::Result<()> {
 
 fn cmd_list(a: &Args) -> anyhow::Result<()> {
     let archive = archive_path(a)?;
-    let entries = with_password(a, |pw| ziptool_core::list(archive, pw))?;
+    let filter = name_filter(a);
+    let mut entries = with_password(a, |pw| ziptool_core::list(archive, pw))?;
+    entries.retain(|e| filter.allows(&e.name));
     // 不是壓縮檔的分割檔（影片.mkv.001）：接回的就是原檔
     let format = match Format::detect(archive) {
         Ok(f) => f.name(),
@@ -608,6 +701,7 @@ fn main() -> ExitCode {
         Some(Cmd::List) => cmd_list(&args),
         Some(Cmd::Test) => cmd_test(&args),
         Some(Cmd::Hash) => cmd_hash(&args),
+        Some(Cmd::Rename) => cmd_rename(&args),
         Some(Cmd::Info) | None => {
             cmd_info();
             Ok(())

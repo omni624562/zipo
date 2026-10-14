@@ -1044,6 +1044,38 @@ fn split_volumes_keep_mark_of_the_web() {
     assert!(fs::read_to_string(got).unwrap().contains("ZoneId=3"));
 }
 
+/// 7-Zip 的 -i／-x：加入、更新與解壓縮時篩選項目
+#[test]
+fn filter_on_compress_update_and_extract() {
+    use ziptool_core::{Filter, Pattern};
+    let tmp = tempfile::tempdir().unwrap();
+    let (src, extra) = (tmp.path().join("src"), tmp.path().join("extra"));
+    fs::create_dir_all(src.join("cache")).unwrap();
+    fs::create_dir_all(&extra).unwrap();
+    for f in ["src/keep.txt", "src/skip.LOG", "src/cache/c.txt", "extra/n.txt", "extra/n.log"] {
+        fs::write(tmp.path().join(f), f).unwrap();
+    }
+    let filter = Filter { exclude: vec![Pattern::new("*.log", true), Pattern::new("cache", true)], ..Default::default() };
+    let opts = CompressOptions { filter, ..Default::default() };
+    for f in [Format::Zip, Format::SevenZ, Format::TarGz] {
+        let ar = tmp.path().join(format!("f.{}", f.extension()));
+        let files = |ar: &Path| -> Vec<String> {
+            let mut v: Vec<String> = list(ar, None).unwrap().into_iter().filter(|e| !e.is_dir).map(|e| e.name).collect();
+            v.sort();
+            v
+        };
+        compress(std::slice::from_ref(&src), &ar, f, &opts, &NoProgress).unwrap();
+        assert_eq!(files(&ar), ["src/keep.txt"], "{f:?}");
+        update(&ar, std::slice::from_ref(&extra), "", &[], &opts, &NoProgress).unwrap();
+        assert_eq!(files(&ar), ["extra/n.txt", "src/keep.txt"], "{f:?}");
+        // 解壓縮只解出符合 -i 的項目
+        let out = tmp.path().join(format!("out-{}", f.extension()));
+        let only = ExtractOptions { filter: Filter { include: vec![Pattern::new("n.*", true)], ..Default::default() }, ..Default::default() };
+        extract(&ar, &out, &only, &NoProgress).unwrap();
+        assert!(out.join("extra/n.txt").is_file() && !out.join("src/keep.txt").exists(), "{f:?}");
+    }
+}
+
 /// 壓縮檔內重新命名：檔案與資料夾（連同其中的內容）都可以；內容不變；名稱重複或找不到時拒絕
 #[test]
 fn rename_inside_archive() {

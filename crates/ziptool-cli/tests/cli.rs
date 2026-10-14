@@ -219,6 +219,61 @@ fn list_split_plain_file() {
 }
 
 /// -v 分割壓縮，再從 .001 解壓縮
+/// `l` 列出的名稱
+fn listed(dir: &Path, args: &[&str]) -> Vec<String> {
+    let o = run(dir, &[&["l"], args].concat(), "");
+    assert!(o.status.success(), "{}", text(&o));
+    let out = String::from_utf8_lossy(&o.stdout).into_owned();
+    // 每一列以日期開頭，名稱在最後兩個空白之後
+    let mut v: Vec<String> = out.lines().filter(|l| l.starts_with("20") && l.contains("....A")).map(|l| l.rsplit("  ").next().unwrap().to_string()).collect();
+    v.sort();
+    v
+}
+
+/// 與 7-Zip 相同：-x／-i 篩選（加 r 為每一層）、檔名萬用字元配合 -r，以及 rn 指令
+#[test]
+fn include_exclude_recurse_and_rename() {
+    let t = tempfile::tempdir().unwrap();
+    let d = t.path();
+    let proj = d.join("proj");
+    fs::create_dir_all(proj.join("src/cache")).unwrap();
+    fs::create_dir_all(proj.join("node_modules/x")).unwrap();
+    for f in ["a.txt", "a.log", "src/b.txt", "src/b.log", "src/cache/c.txt", "node_modules/x/i.js"] {
+        fs::write(proj.join(f), f).unwrap();
+    }
+    // -xr!：每一層都排除，資料夾連同內容
+    let o = run(d, &["a", "x.zip", "proj", "-xr!*.log", "-xr!node_modules", "-bd"], "");
+    assert!(o.status.success(), "{}", text(&o));
+    assert_eq!(listed(d, &["x.zip"]), ["proj/a.txt", "proj/src/b.txt", "proj/src/cache/c.txt"]);
+    // -x!：只排除最上層
+    let o = run(&proj, &["a", "../y.zip", "-x!*.log", "-x!node_modules", "-bd"], "");
+    assert!(o.status.success(), "{}", text(&o));
+    assert_eq!(listed(d, &["y.zip"]), ["a.txt", "src/b.log", "src/b.txt", "src/cache/c.txt"]);
+    // 萬用字元：只找目前資料夾；加 -r 則每一層都找，保留資料夾結構
+    assert!(run(&proj, &["a", "../w.zip", "*.txt", "-bd"], "").status.success());
+    assert_eq!(listed(d, &["w.zip"]), ["a.txt"]);
+    assert!(run(&proj, &["a", "../r.zip", "*.txt", "-r", "-bd"], "").status.success());
+    assert_eq!(listed(d, &["r.zip"]), ["a.txt", "src/b.txt", "src/cache/c.txt"]);
+
+    // 解壓縮與列出也可以篩選
+    assert!(run(d, &["a", "full.zip", "proj", "-bd"], "").status.success());
+    let o = run(d, &["x", "full.zip", "-oout1", "-ir!*.log", "-bd"], "");
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(d.join("out1/proj/src/b.log").is_file() && !d.join("out1/proj/a.txt").exists());
+    let o = run(d, &["x", "full.zip", "-oout2", "*.txt", "-r", "-bd"], "");
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(d.join("out2/proj/src/cache/c.txt").is_file() && !d.join("out2/proj/a.log").exists());
+    assert_eq!(listed(d, &["full.zip", "-xr!*.txt", "-xr!node_modules"]), ["proj/a.log", "proj/src/b.log"]);
+
+    // rn：成對的舊名稱、新名稱；資料夾連同內容
+    let o = run(d, &["rn", "x.zip", "proj/a.txt", "proj/首頁.txt", "proj/src", "proj/程式", "-bd"], "");
+    assert!(o.status.success(), "{}", text(&o));
+    assert_eq!(listed(d, &["x.zip"]), ["proj/程式/b.txt", "proj/程式/cache/c.txt", "proj/首頁.txt"]);
+    assert_eq!(run(d, &["rn", "x.zip", "proj/首頁.txt"], "").status.code(), Some(7), "名稱要成對");
+    let o = run(d, &["rn", "x.zip", "沒有.txt", "新.txt", "-bd"], "");
+    assert!(!o.status.success() && text(&o).contains("找不到"), "{}", text(&o));
+}
+
 #[test]
 fn split_volumes() {
     let tmp = tempfile::tempdir().unwrap();

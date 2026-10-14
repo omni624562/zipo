@@ -74,7 +74,7 @@ pub fn hash_reader(r: &mut dyn Read, progress: &dyn Progress) -> Result<Hashes> 
 
 /// 計算檔案（資料夾則為其中所有檔案）的雜湊值；回傳（顯示名稱, 雜湊值）
 pub fn hash_files(inputs: &[PathBuf], progress: &dyn Progress) -> Result<Vec<(String, Hashes)>> {
-    let files: Vec<_> = crate::util::collect(inputs)?.into_iter().filter(|i| !i.is_dir).collect();
+    let files: Vec<_> = crate::util::collect(inputs, &crate::Filter::default())?.into_iter().filter(|i| !i.is_dir).collect();
     progress.start(crate::util::total_size(&files));
     let mut out = Vec::with_capacity(files.len());
     for f in files {

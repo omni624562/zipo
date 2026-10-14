@@ -205,6 +205,7 @@ impl AddDialog {
                 encrypt_names: self.encrypt_names && password.is_some() && self.format == Format::SevenZ,
                 password,
                 volume_size,
+                filter: Default::default(),
             },
             then: Then { recycle: self.recycle, open_folder: self.open_folder },
         })

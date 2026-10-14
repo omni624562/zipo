@@ -20,15 +20,20 @@ pub(crate) struct Item {
 
 /// 展開輸入清單：資料夾會遞迴加入，名稱以「輸入項目本身」為根。
 /// 例如輸入 `C:\a\docs`，裡面的檔案會是 `docs/x.txt`。
-pub(crate) fn collect(inputs: &[PathBuf]) -> Result<Vec<Item>> {
+/// `filter` 不符合的項目不加入；被排除的資料夾不再往下找
+pub(crate) fn collect(inputs: &[PathBuf], filter: &crate::Filter) -> Result<Vec<Item>> {
     let mut items = Vec::new();
     for input in inputs {
         let meta = std::fs::metadata(input)?;
         let base = input.parent().unwrap_or(Path::new(""));
         if meta.is_dir() {
-            for e in walkdir::WalkDir::new(input).sort_by_file_name() {
+            let walk = walkdir::WalkDir::new(input).sort_by_file_name().into_iter();
+            for e in walk.filter_entry(|e| !filter.excludes(&to_archive_name(e.path().strip_prefix(base).unwrap_or(e.path())))) {
                 let e = e.map_err(|e| Error::Io(e.into()))?;
                 let rel = e.path().strip_prefix(base).unwrap_or(e.path());
+                if !filter.allows(&to_archive_name(rel)) {
+                    continue;
+                }
                 let md = e.metadata().map_err(|e| Error::Io(e.into()))?;
                 items.push(Item {
                     path: e.path().to_path_buf(),
@@ -43,6 +48,9 @@ pub(crate) fn collect(inputs: &[PathBuf]) -> Result<Vec<Item>> {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .ok_or_else(|| Error::Unsupported(F!("無效的輸入路徑：{}", "Invalid input path: {}", input.display())))?;
+            if !filter.allows(&name) {
+                continue;
+            }
             items.push(Item {
                 path: input.clone(),
                 name,
@@ -258,10 +266,10 @@ impl<'a> Planner<'a> {
 
     pub fn selected(&self, name: &str) -> bool {
         let name = normalize_name(name);
-        match &self.selection {
+        (match &self.selection {
             None => true,
             Some(sel) => sel.iter().any(|s| name == *s || name.starts_with(&format!("{s}/"))),
-        }
+        }) && self.opts.filter.allows(&name)
     }
 
     /// 回傳輸出路徑；未選取、不需輸出（例如 flatten 時的資料夾）或名稱不安全（記錄後略過）時回傳 `None`。
