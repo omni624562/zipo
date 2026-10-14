@@ -3,8 +3,8 @@
 2 ICON "archive.ico"
 
 1 VERSIONINFO
-FILEVERSION 0,4,10,0
-PRODUCTVERSION 0,4,10,0
+FILEVERSION 0,4,11,0
+PRODUCTVERSION 0,4,11,0
 BEGIN
   BLOCK "StringFileInfo"
   BEGIN
@@ -13,8 +13,8 @@ BEGIN
       VALUE "FileDescription", "Zipo"
       VALUE "ProductName", "Zipo"
       VALUE "OriginalFilename", "zipo-gui.exe"
-      VALUE "FileVersion", "0.4.10"
-      VALUE "ProductVersion", "0.4.10"
+      VALUE "FileVersion", "0.4.11"
+      VALUE "ProductVersion", "0.4.11"
     END
   END
   BLOCK "VarFileInfo"
