@@ -520,6 +520,17 @@ mod tests {
         assert_eq!(one, Some(vec![t.path().join("x")]));
     }
 
+    /// 實機測試（會改寫真正的剪貼簿，平常不執行）：`cargo test real_clipboard -- --ignored`
+    /// 環境變數 ZIPO_CLIP_FILES 為以 | 分隔的檔案路徑；複製到剪貼簿後由 PowerShell 檢查檔案總管看得到，
+    /// 也確認 Zipo 讀回同樣的檔案（Ctrl+V 用）
+    #[test]
+    #[ignore]
+    fn real_clipboard_roundtrip() {
+        let files: Vec<std::path::PathBuf> = std::env::var("ZIPO_CLIP_FILES").unwrap().split('|').map(Into::into).collect();
+        copy_files(&files).unwrap();
+        assert_eq!(clipboard_files(), files, "Zipo 讀回剪貼簿上的檔案");
+    }
+
     /// 放到剪貼簿的檔案清單，Windows 自己（DragQueryFileW）讀得出同樣的路徑；不動到真正的剪貼簿
     #[test]
     fn dropfiles_are_readable_by_windows() {

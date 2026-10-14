@@ -556,6 +556,18 @@ pub fn recycle(paths: &[PathBuf]) -> std::io::Result<()> {
     Ok(())
 }
 
+/// 實機測試（會把檔案移到真正的資源回收筒，平常不執行）：`cargo test real_recycle -- --ignored`
+/// 環境變數 ZIPO_RECYCLE_FILE 為要移走的檔案
+#[cfg(all(test, windows))]
+#[test]
+#[ignore]
+fn real_recycle_moves_file_to_recycle_bin() {
+    let f = PathBuf::from(std::env::var("ZIPO_RECYCLE_FILE").unwrap());
+    assert!(f.exists());
+    recycle(std::slice::from_ref(&f)).unwrap();
+    assert!(!f.exists(), "應已移走");
+}
+
 #[cfg(not(windows))]
 #[cfg_attr(test, allow(dead_code))]
 pub fn recycle(_paths: &[PathBuf]) -> std::io::Result<()> {
