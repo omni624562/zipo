@@ -13,9 +13,10 @@ permissions:
 jobs:
   release:
     runs-on: windows-latest
-    # 只有這個工作需要建立 Release
+    # 只有這個工作需要建立 Release；讀取 CI 結果需要 actions: read
     permissions:
       contents: write
+      actions: read
     env:
       TAG: ${{ github.ref_name }}
       TARGET: x86_64-pc-windows-msvc
@@ -32,8 +33,14 @@ jobs:
             grep -q "^version = \"$v\"" "$c/Cargo.toml" || { echo "標籤 $TAG 與 $c/Cargo.toml 的版本不一致"; exit 1; }
           done
           test -f "docs/releases/$TAG.md" || { echo "缺少 docs/releases/$TAG.md"; exit 1; }
-      - name: 測試
-        run: cargo test --workspace --target $env:TARGET
+      # 同一個 commit 已在 CI 的三個平台測試過：確認通過就不再重跑（發布從約 25 分鐘縮短為約 10 分鐘）
+      - name: 確認這個版本的 CI 已通過
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ok=$(gh run list --workflow CI --commit "$GITHUB_SHA" --json conclusion,event -q '[.[] | select(.event == "push" and .conclusion == "success")] | length')
+          [ "$ok" -gt 0 ] || { echo "這個版本（$GITHUB_SHA）的 CI 尚未通過，請等 CI 通過後再推送標籤"; exit 1; }
       - name: 建置
         run: cargo build --release --target $env:TARGET
       - name: 打包並測試壓縮檔
