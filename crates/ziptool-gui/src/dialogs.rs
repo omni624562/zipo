@@ -32,6 +32,9 @@ const VOLUMES: [(&str, &str, u64); 5] = [
     ("自訂…", "Custom…", 0),
 ];
 
+/// 自訂分割大小的單位（顯示文字, 位元組）
+const VOLUME_UNITS: [(&str, u64); 3] = [("KB", 1 << 10), ("MB", 1 << 20), ("GB", 1 << 30)];
+
 pub struct AddDialog {
     inputs: Vec<PathBuf>,
     archive: String,
@@ -45,9 +48,10 @@ pub struct AddDialog {
     encrypt_names: bool,
     /// 壓縮後將原始檔移到資源回收筒
     recycle: bool,
-    /// 分割大小：`VOLUMES` 的索引；自訂時為 `volume_mb`
+    /// 分割大小：`VOLUMES` 的索引；自訂時為 `volume_mb`（單位為 `VOLUME_UNITS[volume_unit]`）
     volume: usize,
     volume_mb: String,
+    volume_unit: usize,
     pub open_folder: bool,
     error: Option<String>,
     /// 要壓縮的總大小（資料夾含所有內容）；在背景計算，算好前為 None
@@ -123,6 +127,7 @@ impl AddDialog {
             open_folder: false,
             volume: 0,
             volume_mb: String::new(),
+            volume_unit: 1,
             error: None,
             size: None,
             size_rx: {
@@ -177,7 +182,14 @@ impl AddDialog {
         let volume_size = match self.volume {
             0 => None,
             i if i == VOLUMES.len() - 1 => Some(
-                self.volume_mb.trim().parse::<u64>().ok().filter(|&n| n > 0).map(|n| n << 20).ok_or(L!("請輸入分割大小（MB，正整數）", "Enter the volume size (MB, a positive integer)"))?,
+                self.volume_mb
+                    .trim()
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|n| n.is_finite())
+                    .map(|n| (n * VOLUME_UNITS[self.volume_unit].1 as f64) as u64)
+                    .filter(|&n| n > 0)
+                    .ok_or(L!("請輸入分割大小（大於 0 的數字，可以有小數）", "Enter the volume size (a number greater than 0; decimals are allowed)"))?,
             ),
             i => Some(VOLUMES[i].2),
         };
@@ -285,7 +297,11 @@ impl AddDialog {
                     field_label(ui, "");
                     ui.horizontal(|ui| {
                         ui.add(egui::TextEdit::singleline(&mut self.volume_mb).desired_width(90.0).hint_text(L!("例如 500", "e.g. 500")));
-                        ui.label(RichText::new("MB").color(p.text2));
+                        egui::ComboBox::from_id_salt("vol_unit").width(70.0).selected_text(VOLUME_UNITS[self.volume_unit].0).show_ui(ui, |ui| {
+                            for (i, (unit, _)) in VOLUME_UNITS.iter().enumerate() {
+                                ui.selectable_value(&mut self.volume_unit, i, *unit);
+                            }
+                        });
                     });
                     ui.end_row();
                 }
@@ -568,6 +584,29 @@ mod tests {
         }
         assert_eq!(d.total_size(), Some(1524));
         assert_eq!(d.summary(), "要壓縮：照片、說明.txt（2 個項目，共 1.5 KB）");
+    }
+
+    /// 自訂分割大小可以選單位（KB、MB、GB，預設 MB），也可以輸入小數
+    #[test]
+    fn custom_volume_size_with_unit() {
+        let t = tempfile::tempdir().unwrap();
+        let f = t.path().join("a.txt");
+        std::fs::write(&f, "a").unwrap();
+        let size = |text: &str, unit: usize| {
+            let mut d = AddDialog::new(vec![f.clone()], Format::Zip, 3);
+            d.volume = VOLUMES.len() - 1;
+            d.volume_mb = text.into();
+            d.volume_unit = unit;
+            d.validate().map(|t| match t {
+                Task::Compress { opts, .. } => opts.volume_size,
+                _ => None,
+            })
+        };
+        assert_eq!(size("500", 1), Ok(Some(500 << 20)), "預設 MB");
+        assert_eq!(size("1.5", 2), Ok(Some(3 << 29)), "1.5 GB");
+        assert_eq!(size("64", 0), Ok(Some(64 << 10)), "KB");
+        assert!(size("0", 1).is_err() && size("abc", 1).is_err() && size("", 2).is_err() && size("inf", 2).is_err() && size("-5", 1).is_err());
+        assert_eq!(AddDialog::new(vec![f.clone()], Format::Zip, 3).volume_unit, 1, "預設單位 MB");
     }
 
     /// 密碼只在勾選「設定密碼」時使用；勾選了卻沒輸入時提醒
