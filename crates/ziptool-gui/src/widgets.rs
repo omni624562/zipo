@@ -66,7 +66,8 @@ pub fn command_button(ui: &mut egui::Ui, glyph: &str, label: Option<&str>) -> eg
 }
 
 /// 只有圖示的 32×32 按鈕（上一頁、下一頁、上一層）。
-pub fn icon_button(ui: &mut egui::Ui, glyph: &str) -> egui::Response {
+/// `name`：給螢幕報讀程式的按鈕名稱（畫面上只顯示圖示）
+pub fn icon_button(ui: &mut egui::Ui, glyph: &str, name: &str) -> egui::Response {
     let p = pal(ui);
     let enabled = ui.is_enabled();
     let (rect, resp) = ui.allocate_exact_size(vec2(CONTROL_H, CONTROL_H), Sense::click());
@@ -76,6 +77,7 @@ pub fn icon_button(ui: &mut egui::Ui, glyph: &str) -> egui::Response {
     let g = ui.painter().layout_no_wrap(glyph.to_string(), FontId::proportional(16.0), if enabled { p.text } else { p.muted });
     let pos = rect.center() - g.size() / 2.0;
     ui.painter().galley(pos, g, p.text);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, name));
     resp
 }
 

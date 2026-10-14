@@ -1876,6 +1876,8 @@ impl App {
             button(ui, st.delete, icon::TRASH, L!("刪除", "Delete"), delete_tip, L!("先選取要刪除的項目", "Select items to delete first"), Action::Delete);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let more = command_button(ui, icon::DOTS_THREE, None).on_hover_text(L!("更多", "More"));
+                // 只有圖示：另外給螢幕報讀程式名稱
+                more.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, L!("更多", "More")));
                 let popup = egui::Popup::menu(&more);
                 #[cfg(debug_assertions)]
                 let popup = if self.shot_menu { popup.open(true) } else { popup };
@@ -1976,13 +1978,13 @@ impl App {
         let mut filter_changed = false;
         ui.allocate_ui_with_layout(vec2(w, CONTROL_H), Layout::left_to_right(Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            if ui.add_enabled_ui(!self.back.is_empty(), |ui| icon_button(ui, icon::ARROW_LEFT)).inner.on_hover_text(L!("上一頁（Alt+←）", "Back (Alt+←)")).clicked() {
+            if ui.add_enabled_ui(!self.back.is_empty(), |ui| icon_button(ui, icon::ARROW_LEFT, L!("上一頁", "Back"))).inner.on_hover_text(L!("上一頁（Alt+←）", "Back (Alt+←)")).clicked() {
                 self.go_back();
             }
-            if ui.add_enabled_ui(!self.forward.is_empty(), |ui| icon_button(ui, icon::ARROW_RIGHT)).inner.on_hover_text(L!("下一頁（Alt+→）", "Forward (Alt+→)")).clicked() {
+            if ui.add_enabled_ui(!self.forward.is_empty(), |ui| icon_button(ui, icon::ARROW_RIGHT, L!("下一頁", "Forward"))).inner.on_hover_text(L!("下一頁（Alt+→）", "Forward (Alt+→)")).clicked() {
                 self.go_forward();
             }
-            if ui.add_enabled_ui(self.loc.parent().is_some(), |ui| icon_button(ui, icon::ARROW_UP)).inner.on_hover_text(L!("上一層（Alt+↑）", "Up (Alt+Up)")).clicked() {
+            if ui.add_enabled_ui(self.loc.parent().is_some(), |ui| icon_button(ui, icon::ARROW_UP, L!("上一層", "Up"))).inner.on_hover_text(L!("上一層（Alt+↑）", "Up (Alt+Up)")).clicked() {
                 self.go_up();
             }
             ui.add_space(4.0);
@@ -2001,8 +2003,7 @@ impl App {
                 });
                 ui.add_space(4.0);
                 // 選擇資料夾：開啟 Windows 的選擇資料夾視窗，選好就切換過去
-                let pick = icon_button(ui, icon::FOLDER_OPEN).on_hover_text(L!("選擇資料夾…", "Choose a folder…"));
-                pick.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, L!("選擇資料夾…", "Choose a folder…")));
+                let pick = icon_button(ui, icon::FOLDER_OPEN, L!("選擇資料夾…", "Choose a folder…")).on_hover_text(L!("選擇資料夾…", "Choose a folder…"));
                 if pick.clicked()
                     && let Some(d) = self.pick_folder()
                 {
@@ -4664,6 +4665,24 @@ mod drag_out_tests {
         frame(&mut app, vec![egui::Event::PointerMoved(zh)]);
         frame(&mut app, click(zh));
         assert_eq!(app.language, Language::Chinese);
+    }
+
+    /// 只有圖示的按鈕也有名稱，螢幕報讀程式讀得出來（上一頁、下一頁、上一層、選擇資料夾、更多）
+    #[test]
+    fn icon_buttons_have_accessible_names() {
+        let t = tempfile::tempdir().unwrap();
+        let mut app = App::new(Some(real_path(t.path())));
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut out = ctx.run_ui(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(1000.0, 200.0))), ..Default::default() }, |ui| {
+            app.command_bar(ui);
+            app.address_bar(ui);
+        });
+        out.textures_delta.clear();
+        let labels: Vec<String> = out.platform_output.accesskit_update.unwrap().nodes.iter().filter_map(|(_, n)| n.label().map(str::to_string)).collect();
+        for name in ["上一頁", "下一頁", "上一層", "選擇資料夾…", "更多"] {
+            assert!(labels.iter().any(|l| l == name), "缺少「{name}」：{labels:?}");
+        }
     }
 
     /// 網址列旁有「選擇資料夾」按鈕，點了開啟選擇資料夾的視窗，選好的資料夾會切換過去
