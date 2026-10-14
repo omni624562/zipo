@@ -564,7 +564,7 @@ impl PasswordDialog {
     }
 }
 
-/// 壓縮檔內重新命名（F2）：與檔案總管相同，一開始選取主檔名
+/// 壓縮檔內重新命名（F2）與新增資料夾：與檔案總管相同，一開始選取主檔名（資料夾為整個名稱）
 pub struct RenameDialog {
     archive: PathBuf,
     /// 項目所在的資料夾（壓縮檔內的路徑，最上層為空字串）
@@ -574,12 +574,23 @@ pub struct RenameDialog {
     /// 同一資料夾中其他項目的名稱
     taken: Vec<String>,
     password: Option<String>,
+    is_dir: bool,
+    /// 新增資料夾（`old` 為預設名稱）
+    create: bool,
     focused: bool,
 }
 
 impl RenameDialog {
-    pub fn new(archive: PathBuf, folder: String, old: String, taken: Vec<String>, password: Option<String>) -> Self {
-        Self { archive, folder, name: old.clone(), old, taken, password, focused: false }
+    pub fn new(archive: PathBuf, folder: String, old: String, is_dir: bool, taken: Vec<String>, password: Option<String>) -> Self {
+        Self { archive, folder, name: old.clone(), old, taken, password, is_dir, create: false, focused: false }
+    }
+
+    /// 新增資料夾：預設名稱與檔案總管相同，已有時加上編號
+    pub fn new_folder(archive: PathBuf, folder: String, taken: Vec<String>, password: Option<String>) -> Self {
+        let base = L!("新增資料夾", "New folder");
+        let free = |n: &String| !taken.iter().any(|t| t.to_lowercase() == n.to_lowercase());
+        let name = std::iter::once(base.to_string()).chain((2..).map(|i| format!("{base} ({i})"))).find(free).unwrap();
+        Self { create: true, ..Self::new(archive, folder, name, true, taken, password) }
     }
 
     /// 新名稱不能用的原因
@@ -599,16 +610,20 @@ impl RenameDialog {
     pub fn ui(&mut self, ui: &mut egui::Ui) -> Outcome<Task> {
         let p = pal(ui);
         ui.set_width(380.0);
-        dialog_title(ui, icon::PENCIL_SIMPLE, L!("重新命名", "Rename"));
-        ui.label(RichText::new(&self.old).color(p.text2));
-        ui.add_space(6.0);
+        if self.create {
+            dialog_title(ui, icon::FOLDER_PLUS, L!("新增資料夾", "New folder"));
+        } else {
+            dialog_title(ui, icon::PENCIL_SIMPLE, L!("重新命名", "Rename"));
+            ui.label(RichText::new(&self.old).color(p.text2));
+            ui.add_space(6.0);
+        }
         let r = ui.add(egui::TextEdit::singleline(&mut self.name).desired_width(f32::INFINITY));
         if !self.focused {
             self.focused = true;
             r.request_focus();
             // 選取主檔名（不含副檔名），直接打字就能換掉
             let stem = match self.old.rfind('.') {
-                Some(i) if i > 0 => self.old[..i].chars().count(),
+                Some(i) if i > 0 && !self.is_dir => self.old[..i].chars().count(),
                 _ => self.old.chars().count(),
             };
             if let Some(mut st) = egui::TextEdit::load_state(ui.ctx(), r.id) {
@@ -621,12 +636,14 @@ impl RenameDialog {
         if let Some(why) = problem {
             error_text(ui, why);
         }
-        let (ok, cancel) = dialog_buttons(ui, L!("重新命名", "Rename"));
+        let (ok, cancel) = dialog_buttons(ui, if self.create { L!("建立", "Create") } else { L!("重新命名", "Rename") });
         let name = self.name.trim();
-        if cancel || (ok && name == self.old) {
+        let full = |n: &str| if self.folder.is_empty() { n.to_string() } else { format!("{}/{n}", self.folder) };
+        if ok && self.create && problem.is_none() {
+            Outcome::Ok(Task::NewFolder { archive: self.archive.clone(), path: full(name), password: self.password.clone() })
+        } else if cancel || (ok && name == self.old) {
             Outcome::Cancel
         } else if ok && problem.is_none() {
-            let full = |n: &str| if self.folder.is_empty() { n.to_string() } else { format!("{}/{n}", self.folder) };
             Outcome::Ok(Task::Rename { archive: self.archive.clone(), from: full(&self.old), to: full(name), password: self.password.clone() })
         } else {
             Outcome::Pending

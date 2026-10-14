@@ -33,6 +33,8 @@ pub enum Task {
     Update { archive: PathBuf, add: Vec<PathBuf>, into: String, remove: Vec<String>, password: Option<String> },
     /// 壓縮檔內重新命名：`from`、`to` 為壓縮檔內的完整名稱（資料夾連同其中的內容）
     Rename { archive: PathBuf, from: String, to: String, password: Option<String> },
+    /// 在壓縮檔內新增空的資料夾；`path` 為壓縮檔內的完整名稱
+    NewFolder { archive: PathBuf, path: String, password: Option<String> },
     /// 把壓縮檔內的單一檔案解到暫存資料夾後，用系統預設程式開啟。
     OpenInside { archive: PathBuf, entry: String, strip: String, password: Option<String> },
     /// 拖曳大型項目前，先在背景解到暫存資料夾（顯示進度），完成後再拖曳一次即可
@@ -55,6 +57,7 @@ impl Task {
             Task::PrepareDrag { .. } => L!("正在準備拖曳", "Preparing to drag"),
             Task::Update { .. } => L!("正在更新壓縮檔", "Updating archive"),
             Task::Rename { .. } => L!("正在重新命名", "Renaming"),
+            Task::NewFolder { .. } => L!("正在新增資料夾", "Creating folder"),
             Task::Hash { .. } | Task::HashInside { .. } => L!("正在計算雜湊值", "Calculating hashes"),
         }
     }
@@ -66,6 +69,7 @@ impl Task {
             | Task::OpenInside { password, .. }
             | Task::Update { password, .. }
             | Task::Rename { password, .. }
+            | Task::NewFolder { password, .. }
             | Task::HashInside { password, .. }
             | Task::OpenNested { password, .. }
             | Task::PrepareDrag { password, .. } => *password = Some(pw),
@@ -414,6 +418,21 @@ fn run(task: Task, s: &Shared) -> Result<Outcome, Error> {
             let opts = CompressOptions { password, ..Default::default() };
             ziptool_core::rename(&archive, &from, &to, &opts, s)?;
             // 與檔案總管相同：改好名稱就好，不另外通知
+            Ok(Outcome { refresh: true, ..Default::default() })
+        }
+        Task::NewFolder { archive, path, password } => {
+            *lock(&s.stage) = file_name(&archive);
+            // 先在暫存資料夾建立同名的空資料夾，再加入壓縮檔
+            let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+            let tmp = std::env::temp_dir().join(format!("zipo-newfolder-{stamp}"));
+            let (into, leaf) = path.rsplit_once('/').unwrap_or(("", path.as_str()));
+            let dir = tmp.join(leaf);
+            let res = std::fs::create_dir_all(&dir).map_err(Error::from).and_then(|()| {
+                let opts = CompressOptions { password, ..Default::default() };
+                ziptool_core::update(&archive, &[dir], into, &[], &opts, s)
+            });
+            let _ = std::fs::remove_dir_all(&tmp);
+            res?;
             Ok(Outcome { refresh: true, ..Default::default() })
         }
         Task::Hash { inputs } => Ok(Outcome { hashes: ziptool_core::hash_files(&inputs, s)?, ..Default::default() }),

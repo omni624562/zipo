@@ -525,6 +525,7 @@ enum Action {
     Info,
     Delete,
     Rename,
+    NewFolder,
     Hash,
 }
 
@@ -1241,10 +1242,24 @@ impl App {
         let &[i] = self.sel.iter().copied().collect::<Vec<_>>().as_slice() else {
             return self.notice(L!("重新命名", "Rename"), L!("請只選取一個要重新命名的項目。", "Select only one item to rename."));
         };
-        let old = self.rows[i].name.clone();
+        let (old, is_dir) = (self.rows[i].name.clone(), self.rows[i].is_dir);
         let taken = self.rows.iter().filter(|r| r.name != old).map(|r| r.name.clone()).collect();
         let password = self.cache.as_ref().and_then(|c| c.password.clone());
-        self.dialog = Some(Dialog::Rename(RenameDialog::new(path, inner, old, taken, password)));
+        self.dialog = Some(Dialog::Rename(RenameDialog::new(path, inner, old, is_dir, taken, password)));
+    }
+
+    /// 壓縮檔內新增資料夾（Ctrl+Shift+N）：建在目前所在的資料夾
+    fn cmd_new_folder(&mut self) {
+        let Location::Archive { path, inner } = self.loc.clone() else { return };
+        if let Some(why) = self.read_only_reason() {
+            return self.notice(L!("新增資料夾", "New folder"), why);
+        }
+        if Format::detect(&path).is_ok_and(|f| f.is_single()) {
+            return self.notice(L!("新增資料夾", "New folder"), L!("這種格式只能包含單一檔案，無法新增資料夾。", "This format contains only a single file; folders cannot be added."));
+        }
+        let taken = self.rows.iter().map(|r| r.name.clone()).collect();
+        let password = self.cache.as_ref().and_then(|c| c.password.clone());
+        self.dialog = Some(Dialog::Rename(RenameDialog::new_folder(path, inner, taken, password)));
     }
 
     /// 資料夾中的刪除：與檔案總管相同，移到資源回收筒（可以還原，所以不另外確認）；
@@ -1380,6 +1395,7 @@ impl App {
             Action::Info => self.cmd_info(),
             Action::Delete => self.cmd_delete(),
             Action::Rename => self.cmd_rename(),
+            Action::NewFolder => self.cmd_new_folder(),
             Action::Hash => self.cmd_hash(),
         }
     }
@@ -1606,7 +1622,7 @@ impl App {
                 self.watch(archive.clone(), entry.clone(), file.clone(), password.clone());
             }
             // Zipo 自己更新了壓縮檔（存回、加入、刪除）：不算被其他程式取代
-            if let (Task::Update { archive, .. } | Task::Rename { archive, .. }, Ok(_)) = (&task, &res) {
+            if let (Task::Update { archive, .. } | Task::Rename { archive, .. } | Task::NewFolder { archive, .. }, Ok(_)) = (&task, &res) {
                 for w in self.watched.iter_mut().filter(|w| &w.archive == archive) {
                     w.archive_stamp = file_stamp(archive);
                 }
@@ -1659,7 +1675,7 @@ impl App {
                         Task::Extract { archives, .. } | Task::Test { archives, .. } => file_name(&archives[0]),
                         Task::OpenInside { archive, .. } | Task::OpenNested { archive, .. } | Task::PrepareDrag { archive, .. } => file_name(archive),
                         Task::Compress { output, .. } => file_name(output),
-                        Task::Update { archive, .. } | Task::Rename { archive, .. } | Task::HashInside { archive, .. } => file_name(archive),
+                        Task::Update { archive, .. } | Task::Rename { archive, .. } | Task::NewFolder { archive, .. } | Task::HashInside { archive, .. } => file_name(archive),
                         Task::Hash { inputs } => inputs.first().map(|p| file_name(p)).unwrap_or_default(),
                     };
                     self.dialog = Some(Dialog::Password(PasswordDialog::new(
@@ -1887,6 +1903,7 @@ impl App {
             };
             if st.in_archive {
                 button(ui, true, icon::PLUS_CIRCLE, L!("加入", "Add"), L!("選擇檔案加入目前開啟的壓縮檔", "Choose files to add to the open archive"), "", Action::Add);
+                button(ui, true, icon::FOLDER_PLUS, L!("新增資料夾", "New folder"), L!("在目前的位置新增資料夾（Ctrl+Shift+N）", "Create a folder here (Ctrl+Shift+N)"), "", Action::NewFolder);
             } else {
                 button(ui, st.compress, icon::FILE_ZIP, L!("壓縮", "Compress"), L!("把選取的檔案或資料夾壓縮成壓縮檔", "Compress the selected files or folders into an archive"), L!("先選取要壓縮的檔案或資料夾", "Select files or folders to compress first"), Action::Add);
             }
@@ -2262,6 +2279,9 @@ impl App {
                         if in_archive && !nested && ui.button(F!("{}  重新命名", "{}  Rename", icon::PENCIL_SIMPLE)).clicked() {
                             ctx_action = Some(Action::Rename);
                         }
+                        if in_archive && !nested && ui.button(F!("{}  新增資料夾", "{}  New folder", icon::FOLDER_PLUS)).clicked() {
+                            ctx_action = Some(Action::NewFolder);
+                        }
                         if !in_archive && !r.is_drive && ui.button(F!("{}  刪除", "{}  Delete", icon::TRASH)).on_hover_text(L!("移到資源回收筒，可以還原", "Move to the Recycle Bin; it can be restored")).clicked() {
                             ctx_action = Some(Action::Delete);
                         }
@@ -2401,6 +2421,10 @@ impl App {
         }
         if ctx.input(|i| i.key_pressed(Key::F2)) && matches!(self.loc, Location::Archive { .. }) && !self.sel.is_empty() {
             return self.cmd_rename();
+        }
+        // 與檔案總管相同：Ctrl+Shift+N 新增資料夾
+        if ctx.input(|i| i.modifiers.command && i.modifiers.shift && i.key_pressed(Key::N)) && matches!(self.loc, Location::Archive { .. }) {
+            return self.cmd_new_folder();
         }
         if ctx.input(|i| i.modifiers.alt && i.key_pressed(Key::P)) {
             self.preview_open = !self.preview_open;
@@ -3274,7 +3298,7 @@ impl App {
                     }
                     "rename" => {
                         let taken = vec!["期末報告.pdf".into()];
-                        self.dialog = Some(Dialog::Rename(RenameDialog::new("專案資料.zip".into(), String::new(), "期末報告.docx".into(), taken, None)));
+                        self.dialog = Some(Dialog::Rename(RenameDialog::new("專案資料.zip".into(), String::new(), "期末報告.docx".into(), false, taken, None)));
                     }
                     "hash" => {
                         let h = ziptool_core::hash_reader(&mut &b"abc"[..], &ziptool_core::NoProgress).unwrap();
@@ -3978,6 +4002,57 @@ mod update_tests {
         app.sel = [0].into();
         app.cmd_rename();
         assert!(matches!(app.dialog, Some(Dialog::Notice { .. })));
+    }
+
+    /// 壓縮檔內新增資料夾（Ctrl+Shift+N、工具列）：預設名稱不重複，按 Enter 建立
+    #[test]
+    fn new_folder_inside_archive() {
+        let t = tempfile::tempdir().unwrap();
+        let root = real_path(t.path());
+        let src = root.join("proj");
+        std::fs::create_dir_all(src.join("docs")).unwrap();
+        std::fs::write(src.join("docs/a.txt"), "a").unwrap();
+        for f in [Format::Zip, Format::SevenZ] {
+            let ar = root.join(format!("n.{}", f.extension()));
+            ziptool_core::compress(std::slice::from_ref(&src), &ar, f, &Default::default(), &ziptool_core::NoProgress).unwrap();
+            let ctx = egui::Context::default();
+            theme::setup(&ctx);
+            let mut app = App::new(Some(ar.clone()));
+            load(&mut app, &ctx);
+            app.navigate(Location::Archive { path: ar.clone(), inner: "proj/docs".into() });
+
+            let ev = egui::Event::Key { key: Key::N, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::COMMAND | Modifiers::SHIFT };
+            let mut out = ctx.run_ui(egui::RawInput { events: vec![egui::Event::ModifiersChanged(Modifiers::COMMAND | Modifiers::SHIFT), ev], ..Default::default() }, |ui| app.keyboard(ui.ctx()));
+            out.textures_delta.clear();
+            let Some(Dialog::Rename(d)) = &app.dialog else { panic!("Ctrl+Shift+N 應出現新增資料夾") };
+            assert_eq!(d.name, "新增資料夾");
+            dialog_frame(&mut app, &ctx, false);
+            dialog_frame(&mut app, &ctx, true);
+            load(&mut app, &ctx);
+            assert!(app.dialog.is_none(), "{f:?}");
+            assert!(app.rows.iter().any(|r| r.name == "新增資料夾" && r.is_dir), "{f:?} {:?}", names(&app));
+
+            // 再建一個：名稱自動加上編號
+            app.run_action(Action::NewFolder);
+            let Some(Dialog::Rename(d)) = &app.dialog else { panic!("應出現新增資料夾") };
+            assert_eq!(d.name, "新增資料夾 (2)");
+            dialog_frame(&mut app, &ctx, false);
+            dialog_frame(&mut app, &ctx, true);
+            load(&mut app, &ctx);
+            let all: Vec<String> = ziptool_core::list(&ar, None).unwrap().into_iter().filter(|e| e.is_dir).map(|e| e.name.trim_end_matches('/').to_string()).collect();
+            assert!(all.iter().any(|n| n == "proj/docs/新增資料夾") && all.iter().any(|n| n == "proj/docs/新增資料夾 (2)"), "{f:?} {all:?}");
+            // 已有的名稱不能再用
+            app.run_action(Action::NewFolder);
+            let Some(Dialog::Rename(d)) = &mut app.dialog else { panic!() };
+            d.name = "a.txt".into();
+            assert!(d.problem().is_some());
+            app.dialog = None;
+
+            // 無法修改的壓縮檔：說明原因
+            app.nested.push(Nested { path: ar.clone(), parent: Location::Dir(root.clone()) });
+            app.run_action(Action::NewFolder);
+            assert!(matches!(app.dialog, Some(Dialog::Notice { .. })), "{f:?}");
+        }
     }
 
     /// 加入檔案到加密的 zip：先要求密碼，輸入後新檔案也加密
