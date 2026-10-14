@@ -280,7 +280,8 @@ fn run(task: Task, s: &Shared) -> Result<Outcome, Error> {
                 vec![output.clone()]
             };
             let size: u64 = parts.iter().filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum();
-            let total: u64 = s.total.load(Ordering::Relaxed);
+            // 分割時進度改以壓縮檔大小計算，原始大小要另外算
+            let total: u64 = if opts.volume_size.is_some() { crate::dialogs::disk_size(&inputs) } else { s.total.load(Ordering::Relaxed) };
             let ratio = if total > 0 { size as f64 * 100.0 / total as f64 } else { 0.0 };
             let mut message = F!(
                 "{}\n\n原始大小：{}\n壓縮後：{}（{ratio:.0}%）\n耗時：{:.1} 秒", "{}\n\nOriginal size: {}\nCompressed: {} ({ratio:.0}%)\nTime: {:.1} s",
@@ -632,6 +633,14 @@ mod then_tests {
         assert!(o.message.contains("壓縮檔已移到資源回收筒"), "{}", o.message);
         let left: Vec<_> = std::fs::read_dir(t.path()).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with("vol.zip.0") && !n.ends_with(".recycled")).collect();
         assert!(left.is_empty(), "分割檔應全部移除：{left:?}");
+
+        // 分割壓縮：完成訊息的「原始大小」是原始檔案的大小（不是壓縮檔的大小），並列出分割檔數量
+        let big = t.path().join("大檔.bin");
+        std::fs::write(&big, vec![7u8; 300_000]).unwrap();
+        let opts = ziptool_core::CompressOptions { level: Some(0), volume_size: Some(100_000), ..Default::default() };
+        let o = finish(Task::Compress { inputs: vec![big], output: t.path().join("v2.zip"), format: Format::Zip, opts, then: Then::default() });
+        assert!(o.message.contains(&format!("原始大小：{}", crate::human(300_000))), "{}", o.message);
+        assert!(o.message.contains("分割為 4 個檔案"), "{}", o.message);
 
         // 沒有勾選：不動
         let ar = make("keep.zip");

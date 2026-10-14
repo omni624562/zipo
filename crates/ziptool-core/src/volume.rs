@@ -180,8 +180,10 @@ fn plain_name(first: &Path) -> String {
     first.with_extension("").file_name().unwrap_or_default().to_string_lossy().into_owned()
 }
 
-/// 把 `path` 切成每個 `size` 位元組的分割檔，完成後刪除原檔；回傳所有分割檔
-pub(crate) fn split(path: &Path, size: u64) -> Result<Vec<PathBuf>> {
+/// 把 `path` 切成每個 `size` 位元組的分割檔，完成後刪除原檔；回傳所有分割檔。
+/// 回報進度、可以取消；分割檔先以暫存名稱寫入，全部完成才改成正式名稱，
+/// 中途失敗、取消或程式被結束時不會留下看似完整、其實缺檔的分割檔。
+pub(crate) fn split(path: &Path, size: u64, progress: &dyn crate::Progress) -> Result<Vec<PathBuf>> {
     if size == 0 {
         return Err(Error::Unsupported(L!("分割大小不可為 0", "The volume size cannot be 0").into()));
     }
@@ -190,24 +192,48 @@ pub(crate) fn split(path: &Path, size: u64) -> Result<Vec<PathBuf>> {
         name.push(".001");
         path.with_file_name(name)
     };
+    let tmp_of = |p: &Path| {
+        let mut name = p.file_name().unwrap_or_default().to_os_string();
+        name.push(".zipo-part");
+        p.with_file_name(name)
+    };
     let mut parts = Vec::new();
     let res = (|| -> Result<()> {
-        let mut src = io::BufReader::new(File::open(path)?);
+        let mut src = File::open(path)?;
         let total = std::fs::metadata(path)?.len();
+        progress.start(total);
+        let mut buf = vec![0u8; 1 << 20];
         let mut written = 0u64;
         let mut n = 1;
         // 空的壓縮檔也至少產生一個分割檔
         while n == 1 || written < total {
             let part = volume_path(&first, n);
-            let mut out = io::BufWriter::new(File::create(&part)?);
+            progress.entry(&part.file_name().unwrap_or_default().to_string_lossy());
+            let mut out = File::create(tmp_of(&part))?;
             parts.push(part);
-            let copied = io::copy(&mut (&mut src).take(size), &mut out)?;
-            out.flush()?;
-            written += copied;
+            let mut left = size.min(total - written);
+            while left > 0 {
+                if progress.is_cancelled() {
+                    return Err(Error::Cancelled);
+                }
+                let want = left.min(buf.len() as u64) as usize;
+                let n = src.read(&mut buf[..want])?;
+                if n == 0 {
+                    break;
+                }
+                out.write_all(&buf[..n])?;
+                left -= n as u64;
+                written += n as u64;
+                progress.advance(n as u64);
+            }
             n += 1;
-            if copied == 0 {
+            if written >= total {
                 break;
             }
+        }
+        // 全部寫完才改成正式名稱
+        for p in &parts {
+            std::fs::rename(tmp_of(p), p)?;
         }
         Ok(())
     })();
@@ -218,6 +244,7 @@ pub(crate) fn split(path: &Path, size: u64) -> Result<Vec<PathBuf>> {
         }
         Err(e) => {
             for p in &parts {
+                let _ = std::fs::remove_file(tmp_of(p));
                 let _ = std::fs::remove_file(p);
             }
             Err(e)
@@ -272,7 +299,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let f = tmp.path().join("c.zip");
         std::fs::write(&f, vec![1u8; 30_000]).unwrap();
-        let parts = split(&f, 10_000).unwrap();
+        let parts = split(&f, 10_000, &NoProgress).unwrap();
         let mine = || -> Vec<String> {
             let parent = if cfg!(windows) { std::env::temp_dir().join("Zipo") } else { std::env::temp_dir() };
             let prefix = format!("zipo-join-{}-", std::process::id());
@@ -285,6 +312,48 @@ mod tests {
         assert!(ensure_space(tmp.path(), 1).is_ok());
     }
 
+    /// 分割途中取消：不留下任何分割檔（也不留下暫存的分割檔），原檔保留；進度依分割的量回報
+    #[test]
+    fn split_reports_progress_and_can_be_cancelled() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        struct P {
+            done: AtomicU64,
+            cancel_after: u64,
+            /// 分割途中看到的正式名稱分割檔（程式在這時被結束，就會留下看似完整的分割檔）
+            first: PathBuf,
+            seen_early: std::sync::atomic::AtomicBool,
+        }
+        impl crate::Progress for P {
+            fn advance(&self, n: u64) {
+                self.done.fetch_add(n, Ordering::Relaxed);
+                if self.first.exists() {
+                    self.seen_early.store(true, Ordering::Relaxed);
+                }
+            }
+            fn is_cancelled(&self) -> bool {
+                self.done.load(Ordering::Relaxed) >= self.cancel_after
+            }
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("p.zip");
+        std::fs::write(&f, vec![3u8; 3_500_000]).unwrap();
+        let first = tmp.path().join("p.zip.001");
+        let all = P { done: AtomicU64::new(0), cancel_after: u64::MAX, first: first.clone(), seen_early: Default::default() };
+        let parts = split(&f, 1_000_000, &all).unwrap();
+        assert_eq!(parts.len(), 4);
+        assert!(!all.seen_early.load(Ordering::Relaxed), "全部完成前不可出現正式名稱的分割檔");
+        assert_eq!(all.done.load(Ordering::Relaxed), 3_500_000, "進度依分割的量回報");
+
+        std::fs::write(&f, vec![3u8; 3_500_000]).unwrap();
+        for p in &parts {
+            std::fs::remove_file(p).unwrap();
+        }
+        let stop = P { done: AtomicU64::new(0), cancel_after: 1_500_000, first, seen_early: Default::default() };
+        assert!(matches!(split(&f, 1_000_000, &stop), Err(Error::Cancelled)));
+        let left: Vec<String> = std::fs::read_dir(tmp.path()).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(left, ["p.zip"], "取消後只剩原檔：{left:?}");
+    }
+
     /// 兩個測試都會改變全域的「保留接合結果」設定，依序執行
     static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -295,7 +364,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let f = tmp.path().join("r.zip");
         std::fs::write(&f, vec![7u8; 30_000]).unwrap();
-        let parts = split(&f, 10_000).unwrap();
+        let parts = split(&f, 10_000, &NoProgress).unwrap();
         keep_joined(true);
         let a = join_if_split(&parts[0], &NoProgress).unwrap().unwrap();
         let b = join_if_split(&parts[0], &NoProgress).unwrap().unwrap();
@@ -322,7 +391,7 @@ mod tests {
         let f = tmp.path().join("a.zip");
         let data: Vec<u8> = (0..250_000u32).map(|i| (i * 31 % 251) as u8).collect();
         std::fs::write(&f, &data).unwrap();
-        let parts = split(&f, 100_000).unwrap();
+        let parts = split(&f, 100_000, &NoProgress).unwrap();
         let names: Vec<String> = parts.iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
         assert_eq!(names, ["a.zip.001", "a.zip.002", "a.zip.003"]);
         assert!(!f.exists(), "原檔應刪除");

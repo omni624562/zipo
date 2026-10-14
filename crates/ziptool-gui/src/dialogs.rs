@@ -56,7 +56,7 @@ pub struct AddDialog {
 }
 
 /// 檔案與資料夾（含所有內容）的總大小；不跟隨符號連結
-fn disk_size(paths: &[PathBuf]) -> u64 {
+pub(crate) fn disk_size(paths: &[PathBuf]) -> u64 {
     let mut total = 0u64;
     let mut stack: Vec<PathBuf> = paths.to_vec();
     while let Some(p) = stack.pop() {

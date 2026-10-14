@@ -262,7 +262,10 @@ pub fn compress(
     }
     .and_then(|()| Ok(std::fs::rename(&part, output)?))
     .and_then(|()| match opts.volume_size {
-        Some(size) => volume::split(output, size).map(drop),
+        Some(size) => volume::split(output, size, progress).map(drop).inspect_err(|_| {
+            // 分割失敗或取消：不留下未分割的完整壓縮檔（使用者要的是分割檔）
+            let _ = std::fs::remove_file(output);
+        }),
         None => Ok(()),
     });
     if res.is_err() {
