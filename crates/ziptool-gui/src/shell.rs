@@ -26,6 +26,7 @@ fn verbs(exe: &Path) -> Vec<(String, &'static str, String)> {
         let base = format!(r"SystemFileAssociations\{ext}\shell");
         v.push((format!(r"{base}\ZipTool.Open"), L!("用 Zipo 開啟", "Open with Zipo"), format!("\"{exe}\" \"%1\"")));
         v.push((format!(r"{base}\ZipTool.ExtractHere"), L!("解壓縮到這裡（Zipo）", "Extract here (Zipo)"), format!("\"{exe}\" --extract-here \"%1\"")));
+        v.push((format!(r"{base}\ZipTool.ExtractTo"), L!("解壓縮到同名資料夾（Zipo）", "Extract to a folder of the same name (Zipo)"), format!("\"{exe}\" --extract-to \"%1\"")));
         v.push((format!(r"{base}\ZipTool.ExtractFolder"), L!("解壓縮到資料夾（Zipo）…", "Extract to folder (Zipo)…"), format!("\"{exe}\" --extract-folder \"%1\"")));
     }
     v
@@ -437,6 +438,8 @@ mod tests {
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
         let cmd: String = hkcu.open_subkey(format!(r"{root}\SystemFileAssociations\.7z\shell\ZipTool.ExtractHere\command")).unwrap().get_value("").unwrap();
         assert_eq!(cmd, r#""C:\Program Files\Zipo\zipo-gui.exe" --extract-here "%1""#);
+        let cmd: String = hkcu.open_subkey(format!(r"{root}\SystemFileAssociations\.zip\shell\ZipTool.ExtractTo\command")).unwrap().get_value("").unwrap();
+        assert_eq!(cmd, r#""C:\Program Files\Zipo\zipo-gui.exe" --extract-to "%1""#);
         let label: String = hkcu.open_subkey(format!(r"{root}\Directory\shell\ZipTool.Add")).unwrap().get_value("MUIVerb").unwrap();
         assert_eq!(label, "用 Zipo 壓縮…");
 

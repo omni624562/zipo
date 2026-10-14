@@ -135,6 +135,7 @@ fn run_app() -> eframe::Result {
         StartAction::Add(p) => shell::collect("add", p).map(StartAction::Add),
         StartAction::ExtractHere(p) => shell::collect("extract-here", p).map(StartAction::ExtractHere),
         StartAction::ExtractFolder(p) => shell::collect("extract-folder", p).map(StartAction::ExtractFolder),
+        StartAction::ExtractTo(p) => shell::collect("extract-to", p).map(StartAction::ExtractTo),
         other => Some(other),
     };
     let Some(start) = start else { return Ok(()) };
@@ -184,6 +185,8 @@ enum StartAction {
     Add(Vec<PathBuf>),
     ExtractHere(Vec<PathBuf>),
     ExtractFolder(Vec<PathBuf>),
+    /// 各自解到與壓縮檔同名的資料夾，不另外詢問
+    ExtractTo(Vec<PathBuf>),
 }
 
 fn parse_args(args: Vec<std::ffi::OsString>) -> StartAction {
@@ -194,6 +197,7 @@ fn parse_args(args: Vec<std::ffi::OsString>) -> StartAction {
         Some("--add") if !rest.is_empty() => StartAction::Add(rest),
         Some("--extract-here") if !rest.is_empty() => StartAction::ExtractHere(rest),
         Some("--extract-folder") if !rest.is_empty() => StartAction::ExtractFolder(rest),
+        Some("--extract-to") if !rest.is_empty() => StartAction::ExtractTo(rest),
         Some(s) if s.starts_with("--") => StartAction::None,
         _ => StartAction::Open(PathBuf::from(first)),
     }
@@ -714,6 +718,15 @@ impl App {
                 self.select_names(&archives);
                 let opts = ziptool_core::ExtractOptions { overwrite: ziptool_core::Overwrite::Ask, ..Default::default() };
                 self.spawn(Task::Extract { archives, dest: dir, opts, smart: false, here: true, then: Then::default() });
+            }
+            StartAction::ExtractTo(archives) => {
+                let dir = parent(&archives[0]);
+                self.navigate(Location::Dir(dir.clone()));
+                self.select_names(&archives);
+                // 一個壓縮檔：解到同名資料夾；多個：各自解到同名資料夾（Task::Extract 依壓縮檔名稱分開）
+                let dest = if archives.len() == 1 { dialogs::default_dest(&archives[0]) } else { dir };
+                let opts = ziptool_core::ExtractOptions { overwrite: ziptool_core::Overwrite::Ask, ..Default::default() };
+                self.spawn(Task::Extract { archives, dest, opts, smart: true, here: false, then: Then::default() });
             }
             StartAction::ExtractFolder(archives) => {
                 self.navigate(Location::Dir(parent(&archives[0])));
@@ -3933,6 +3946,7 @@ mod start_tests {
         assert_eq!(parse_args(args(&["--add", "a", "b"])), StartAction::Add(vec!["a".into(), "b".into()]));
         assert_eq!(parse_args(args(&["--extract-here", "x.zip"])), StartAction::ExtractHere(vec!["x.zip".into()]));
         assert_eq!(parse_args(args(&["--extract-folder", "x.zip"])), StartAction::ExtractFolder(vec!["x.zip".into()]));
+        assert_eq!(parse_args(args(&["--extract-to", "x.zip"])), StartAction::ExtractTo(vec!["x.zip".into()]));
         assert_eq!(parse_args(args(&["--add"])), StartAction::None, "缺少參數時不做任何事");
         assert_eq!(parse_args(args(&["--unknown", "x"])), StartAction::None);
     }
@@ -3991,6 +4005,40 @@ mod start_tests {
         let mut app = App::new(None);
         app.apply_start(StartAction::ExtractFolder(archives));
         assert!(matches!(&app.dialog, Some(Dialog::Extract(d)) if d.archive_count() == 2));
+    }
+
+    /// 右鍵「解壓縮到同名資料夾」：不必再按確定；只有一個同名資料夾時不多包一層；多個壓縮檔各自解到同名資料夾
+    #[test]
+    fn extract_to_same_name_folder_from_context_menu() {
+        let t = tempfile::tempdir().unwrap();
+        let root = real_path(t.path());
+        // 專案.zip 裡只有「專案」資料夾；照片.zip 裡有兩個檔案
+        std::fs::create_dir_all(root.join("src/專案")).unwrap();
+        std::fs::write(root.join("src/專案/a.txt"), "a").unwrap();
+        ziptool_core::compress(&[root.join("src/專案")], &root.join("專案.zip"), Format::Zip, &Default::default(), &ziptool_core::NoProgress).unwrap();
+        std::fs::write(root.join("src/1.jpg"), "1").unwrap();
+        std::fs::write(root.join("src/2.jpg"), "2").unwrap();
+        ziptool_core::compress(&[root.join("src/1.jpg"), root.join("src/2.jpg")], &root.join("照片.zip"), Format::Zip, &Default::default(), &ziptool_core::NoProgress).unwrap();
+        let ctx = egui::Context::default();
+        let run = |archives: Vec<PathBuf>| {
+            let mut app = App::new(None);
+            app.apply_start(StartAction::ExtractTo(archives));
+            for _ in 0..400 {
+                app.poll(&ctx);
+                if app.job.is_none() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(matches!(app.dialog, Some(Dialog::Notice { ok: true, .. })));
+        };
+        run(vec![root.join("專案.zip")]);
+        assert_eq!(std::fs::read_to_string(root.join("專案/a.txt")).unwrap(), "a", "不多包一層");
+        std::fs::remove_dir_all(root.join("專案")).unwrap();
+        run(vec![root.join("照片.zip"), root.join("專案.zip")]);
+        assert!(root.join("專案/a.txt").exists());
+        assert_eq!(std::fs::read_to_string(root.join("照片/1.jpg")).unwrap(), "1");
+        assert!(root.join("照片/2.jpg").exists());
     }
 
     /// 右鍵選單對分割壓縮檔的第一個（.001）「解壓縮到這裡」「解壓縮到資料夾」
