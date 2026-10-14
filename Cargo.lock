@@ -6108,6 +6108,7 @@ dependencies = [
  "embed-resource",
  "encoding_rs",
  "image",
+ "raw-window-handle",
  "rfd",
  "serde",
  "serde_json",

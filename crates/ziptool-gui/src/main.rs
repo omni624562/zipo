@@ -15,6 +15,7 @@ mod localize;
 mod perf;
 mod preview;
 mod shell;
+mod taskbar;
 mod theme;
 mod update;
 mod widgets;
@@ -554,6 +555,9 @@ struct App {
     cursor: Option<usize>,
     /// 視窗標題目前對應的位置
     titled: Option<Location>,
+    /// 工作列按鈕上的進度（第一次需要時才建立）
+    #[cfg(windows)]
+    taskbar: Option<taskbar::Taskbar>,
     /// 測試用：選擇資料夾視窗的結果（不跳出真正的視窗）
     #[cfg(test)]
     pick_folder_for_test: Option<PathBuf>,
@@ -630,6 +634,8 @@ impl App {
             addr_editing: false,
             cursor: None,
             titled: None,
+            #[cfg(windows)]
+            taskbar: None,
             #[cfg(test)]
             pick_folder_for_test: None,
             typeahead: String::new(),
@@ -3103,6 +3109,22 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         FIRST_FRAME.store(true, std::sync::atomic::Ordering::Relaxed);
         let ctx = ui.ctx().clone();
+        // 工作列按鈕上的進度：切到其他視窗也看得到
+        #[cfg(windows)]
+        {
+            let state = taskbar::state_for(self.job.as_ref().map(|j| j.snapshot()).as_ref());
+            if self.taskbar.is_none() && state != taskbar::State::None {
+                use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+                if let Ok(h) = frame.window_handle()
+                    && let RawWindowHandle::Win32(w) = h.as_raw()
+                {
+                    self.taskbar = Some(taskbar::Taskbar::new(w.hwnd.get()));
+                }
+            }
+            if let Some(t) = &mut self.taskbar {
+                t.set(state);
+            }
+        }
         // 位置改變時更新視窗標題（工作列上好分辨）
         if self.titled.as_ref() != Some(&self.loc) {
             self.titled = Some(self.loc.clone());
