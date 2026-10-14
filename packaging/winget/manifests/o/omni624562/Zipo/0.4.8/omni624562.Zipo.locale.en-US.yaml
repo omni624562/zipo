@@ -1,7 +1,7 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.10.0.schema.json
 
 PackageIdentifier: omni624562.Zipo
-PackageVersion: 0.4.7
+PackageVersion: 0.4.8
 PackageLocale: en-US
 Publisher: omni624562
 PublisherUrl: https://github.com/omni624562
@@ -23,6 +23,6 @@ Tags:
   - extract
   - unzip
   - zip
-ReleaseNotesUrl: https://github.com/omni624562/zipo/releases/tag/v0.4.7
+ReleaseNotesUrl: https://github.com/omni624562/zipo/releases/tag/v0.4.8
 ManifestType: defaultLocale
 ManifestVersion: 1.10.0
