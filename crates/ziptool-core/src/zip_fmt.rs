@@ -10,8 +10,8 @@ use crate::progress::ProgressReader;
 use crate::util::{Item, Planner, decode_zip_name, from_zip_time, to_zip_time};
 use crate::{CompressOptions, Entry, Error, Progress, Result, TestReport};
 
-pub(crate) fn compress(items: &[Item], output: &Path, opts: &CompressOptions, progress: &dyn Progress) -> Result<()> {
-    let mut zip = ZipWriter::new(BufWriter::new(File::create(output)?));
+pub(crate) fn compress(items: &[Item], out: crate::volume::OutFile, opts: &CompressOptions, progress: &dyn Progress) -> Result<()> {
+    let mut zip = ZipWriter::new(BufWriter::new(out));
     write_items(&mut zip, items, opts, progress)?;
     zip.finish()?.flush()?;
     Ok(())

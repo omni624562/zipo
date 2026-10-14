@@ -117,13 +117,13 @@ pub(crate) fn decoder<'a, R: Read + 'a>(f: Format, r: R) -> Result<Box<dyn Read 
 
 pub(crate) fn compress(
     item: &Item,
-    output: &Path,
+    out: crate::volume::OutFile,
     format: Format,
     level: Option<u32>,
     progress: &dyn Progress,
 ) -> Result<()> {
     progress.entry(&item.name);
-    let mut enc = encoder(format, BufWriter::new(File::create(output)?), level)?;
+    let mut enc = encoder(format, BufWriter::new(out), level)?;
     let mut r = ProgressReader::new(BufReader::new(File::open(&item.path)?), progress);
     io::copy(&mut r, &mut enc)?;
     enc.finish()?.flush()?;

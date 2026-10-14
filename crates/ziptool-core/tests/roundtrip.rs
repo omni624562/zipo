@@ -1044,6 +1044,65 @@ fn split_volumes_keep_mark_of_the_web() {
     assert!(fs::read_to_string(got).unwrap().contains("ZoneId=3"));
 }
 
+/// 分割壓縮一次寫完：壓縮途中不會出現完整的壓縮檔（不需要兩倍的磁碟空間），
+/// 也不會先出現正式名稱的分割檔；取消時不留下任何檔案
+#[test]
+fn split_compress_writes_volumes_directly() {
+    struct Watch {
+        dir: PathBuf,
+        bad: std::sync::Mutex<Vec<String>>,
+        cancel: AtomicBool,
+        seen: AtomicU64,
+    }
+    impl Progress for Watch {
+        fn advance(&self, n: u64) {
+            self.seen.fetch_add(n, Ordering::Relaxed);
+            for e in fs::read_dir(&self.dir).unwrap().flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                // 只允許暫存名稱的分割檔
+                if name.starts_with("big.") && !name.ends_with(".zipo-part") {
+                    self.bad.lock().unwrap().push(name);
+                }
+            }
+        }
+        fn is_cancelled(&self) -> bool {
+            self.cancel.load(Ordering::Relaxed) && self.seen.load(Ordering::Relaxed) > 300_000
+        }
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    fs::create_dir(&src).unwrap();
+    let mut x = 1u32;
+    let data: Vec<u8> = (0..600_000)
+        .map(|_| {
+            x = x.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            (x >> 16) as u8
+        })
+        .collect();
+    fs::write(src.join("data.bin"), &data).unwrap();
+    let out_dir = tmp.path().join("out");
+    fs::create_dir(&out_dir).unwrap();
+    for f in [Format::Zip, Format::SevenZ, Format::TarGz] {
+        let ar = out_dir.join(format!("big.{}", f.extension()));
+        let w = Watch { dir: out_dir.clone(), bad: Default::default(), cancel: AtomicBool::new(false), seen: AtomicU64::new(0) };
+        let opts = CompressOptions { level: Some(1), volume_size: Some(100_000), ..Default::default() };
+        compress(std::slice::from_ref(&src), &ar, f, &opts, &w).unwrap();
+        assert!(w.bad.lock().unwrap().is_empty(), "{f:?}：壓縮途中出現了 {:?}", w.bad.lock().unwrap());
+        let first = out_dir.join(format!("big.{}.001", f.extension()));
+        let back = tmp.path().join(format!("back-{}", f.extension()));
+        extract(&first, &back, &ExtractOptions::default(), &NoProgress).unwrap();
+        assert_eq!(fs::read(back.join("src/data.bin")).unwrap(), data, "{f:?}");
+        for e in fs::read_dir(&out_dir).unwrap().flatten() {
+            fs::remove_file(e.path()).unwrap();
+        }
+        // 取消：不留下任何檔案
+        let w = Watch { dir: out_dir.clone(), bad: Default::default(), cancel: AtomicBool::new(true), seen: AtomicU64::new(0) };
+        assert!(matches!(compress(std::slice::from_ref(&src), &ar, f, &opts, &w), Err(Error::Cancelled)), "{f:?}");
+        let left: Vec<_> = fs::read_dir(&out_dir).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert!(left.is_empty(), "{f:?}：取消後留下 {left:?}");
+    }
+}
+
 /// 不是壓縮檔的分割檔（例如 影片.mkv.001）：與 7-Zip 相同，視為一個檔案，解壓縮即接回原檔
 #[test]
 fn split_plain_file_is_joined_back() {

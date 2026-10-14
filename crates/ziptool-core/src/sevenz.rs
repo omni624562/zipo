@@ -217,8 +217,8 @@ impl Read for LazyFile<'_> {
     }
 }
 
-pub(crate) fn compress(items: &[Item], output: &Path, opts: &CompressOptions, progress: &dyn Progress) -> Result<()> {
-    let mut w = ArchiveWriter::new(BufWriter::new(File::create(output)?)).map_err(map_err)?;
+pub(crate) fn compress(items: &[Item], out: crate::volume::OutFile, opts: &CompressOptions, progress: &dyn Progress) -> Result<()> {
+    let mut w = ArchiveWriter::new(BufWriter::new(out)).map_err(map_err)?;
     let level = opts.level.unwrap_or(5);
     // 每個執行緒約需「字典 × 12（比對結構）＋ 工作區塊」的記憶體（以工作區塊最大為字典 × 4 預留）。
     // 固實區塊依序壓縮，區塊內的工作區塊才能平行處理：工作區塊依執行緒數平分固實區塊，

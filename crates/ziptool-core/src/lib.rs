@@ -254,22 +254,22 @@ pub fn compress(
     }
     let part = util::part_path(output);
     progress.start(util::total_size(&items));
-    let res = match format {
-        Format::Zip => zip_fmt::compress(&items, &part, opts, progress),
-        Format::SevenZ => sevenz::compress(&items, &part, opts, progress),
-        f if f.is_tar() => tar_fmt::compress(&items, &part, f, opts.level, progress),
-        f => single::compress(&items[0], &part, f, opts.level, progress),
-    }
-    .and_then(|()| Ok(std::fs::rename(&part, output)?))
-    .and_then(|()| match opts.volume_size {
-        Some(size) => volume::split(output, size, progress).map(drop).inspect_err(|_| {
-            // 分割失敗或取消：不留下未分割的完整壓縮檔（使用者要的是分割檔）
-            let _ = std::fs::remove_file(output);
-        }),
-        None => Ok(()),
-    });
+    // 分割時直接寫入各分割檔（暫存名稱），不必先產生完整的壓縮檔：省下一倍的磁碟空間與時間
+    let res = volume::OutFile::create(&part, output, opts.volume_size)
+        .and_then(|out| match format {
+            Format::Zip => zip_fmt::compress(&items, out, opts, progress),
+            Format::SevenZ => sevenz::compress(&items, out, opts, progress),
+            f if f.is_tar() => tar_fmt::compress(&items, out, f, opts.level, progress),
+            f => single::compress(&items[0], out, f, opts.level, progress),
+        })
+        .and_then(|()| match opts.volume_size {
+            // 全部完成才改成正式名稱，中途中斷不會留下缺檔的分割檔
+            Some(_) => volume::finish_volumes(output).map(drop),
+            None => Ok(std::fs::rename(&part, output)?),
+        });
     if res.is_err() {
         let _ = std::fs::remove_file(&part);
+        volume::discard_volumes(output);
     }
     cancelled_or(res, progress)
 }
@@ -353,8 +353,8 @@ pub fn update(
             }
             progress.start(util::total_size(&all));
             match format {
-                Format::SevenZ => sevenz::compress(&all, &part, &o, progress),
-                f => tar_fmt::compress(&all, &part, f, o.level, progress),
+                Format::SevenZ => volume::OutFile::create(&part, archive, None).and_then(|out| sevenz::compress(&all, out, &o, progress)),
+                f => volume::OutFile::create(&part, archive, None).and_then(|out| tar_fmt::compress(&all, out, f, o.level, progress)),
             }
         })();
         let _ = std::fs::remove_dir_all(&tmp);

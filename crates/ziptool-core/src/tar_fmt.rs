@@ -20,8 +20,8 @@ fn inner_format(f: Format) -> Option<Format> {
     }
 }
 
-pub(crate) fn compress(items: &[Item], output: &Path, format: Format, level: Option<u32>, progress: &dyn Progress) -> Result<()> {
-    let file = BufWriter::new(File::create(output)?);
+pub(crate) fn compress(items: &[Item], out: crate::volume::OutFile, format: Format, level: Option<u32>, progress: &dyn Progress) -> Result<()> {
+    let file = BufWriter::new(out);
     match inner_format(format) {
         None => write_tar(file, items, progress)?.flush()?,
         Some(f) => {

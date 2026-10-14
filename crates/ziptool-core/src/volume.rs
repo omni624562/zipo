@@ -180,9 +180,156 @@ fn plain_name(first: &Path) -> String {
     first.with_extension("").file_name().unwrap_or_default().to_string_lossy().into_owned()
 }
 
+/// 壓縮的輸出：一般檔案，或直接寫入一組分割檔（不必先產生完整的壓縮檔）
+pub(crate) enum OutFile {
+    Plain(File),
+    Volumes(VolumeWriter),
+}
+
+impl OutFile {
+    /// `part`：一般輸出時的暫存檔；`output`：正式的壓縮檔名稱（分割檔依此命名）
+    pub(crate) fn create(part: &Path, output: &Path, volume: Option<u64>) -> Result<Self> {
+        match volume {
+            None => Ok(OutFile::Plain(File::create(part)?)),
+            Some(0) => Err(Error::Unsupported(L!("分割大小不可為 0", "The volume size cannot be 0").into())),
+            Some(size) => Ok(OutFile::Volumes(VolumeWriter::new(output, size)?)),
+        }
+    }
+}
+
+impl Write for OutFile {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            OutFile::Plain(f) => f.write(buf),
+            OutFile::Volumes(v) => v.write(buf),
+        }
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            OutFile::Plain(f) => f.flush(),
+            OutFile::Volumes(v) => v.flush(),
+        }
+    }
+}
+
+impl io::Seek for OutFile {
+    fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
+        match self {
+            OutFile::Plain(f) => f.seek(pos),
+            OutFile::Volumes(v) => v.seek(pos),
+        }
+    }
+}
+
+/// 依序寫入 名稱.001、名稱.002…（每個 `size` 位元組），也能移回前面的位置改寫（zip、7z 會回頭更新標頭）。
+/// 寫入時使用暫存名稱，壓縮成功後由 [`finish_volumes`] 一次改成正式名稱。
+/// 同時只開啟一個分割檔，分割得再細也不會開啟大量檔案。
+pub(crate) struct VolumeWriter {
+    first: PathBuf,
+    size: u64,
+    pos: u64,
+    len: u64,
+    /// 已建立的分割檔數量
+    created: u64,
+    /// 目前開啟的分割檔：（索引, 檔案, 檔案內的位置）
+    current: Option<(u64, File, u64)>,
+}
+
+impl VolumeWriter {
+    fn new(output: &Path, size: u64) -> Result<Self> {
+        let mut w = VolumeWriter { first: first_volume(output), size, pos: 0, len: 0, created: 0, current: None };
+        // 空的壓縮檔也至少有一個分割檔
+        w.open(0)?;
+        Ok(w)
+    }
+
+    fn open(&mut self, idx: u64) -> io::Result<()> {
+        if self.current.as_ref().is_some_and(|(i, _, _)| *i == idx) {
+            return Ok(());
+        }
+        self.current = None;
+        while self.created <= idx {
+            File::create(tmp_volume(&volume_path(&self.first, self.created as usize + 1)))?;
+            self.created += 1;
+        }
+        let f = std::fs::OpenOptions::new().write(true).open(tmp_volume(&volume_path(&self.first, idx as usize + 1)))?;
+        self.current = Some((idx, f, 0));
+        Ok(())
+    }
+}
+
+impl Write for VolumeWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let (idx, off) = (self.pos / self.size, self.pos % self.size);
+        self.open(idx)?;
+        let (_, f, at) = self.current.as_mut().expect("已開啟");
+        if *at != off {
+            io::Seek::seek(f, io::SeekFrom::Start(off))?;
+        }
+        let n = f.write(&buf[..buf.len().min((self.size - off) as usize)])?;
+        *at = off + n as u64;
+        self.pos += n as u64;
+        self.len = self.len.max(self.pos);
+        Ok(n)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        match &mut self.current {
+            Some((_, f, _)) => f.flush(),
+            None => Ok(()),
+        }
+    }
+}
+
+impl io::Seek for VolumeWriter {
+    fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
+        let to = match pos {
+            io::SeekFrom::Start(p) => Some(p),
+            io::SeekFrom::Current(d) => self.pos.checked_add_signed(d),
+            io::SeekFrom::End(d) => self.len.checked_add_signed(d),
+        };
+        self.pos = to.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "seek before start"))?;
+        Ok(self.pos)
+    }
+}
+
+fn first_volume(output: &Path) -> PathBuf {
+    let mut name = output.file_name().unwrap_or_default().to_os_string();
+    name.push(".001");
+    output.with_file_name(name)
+}
+
+/// 寫入中的分割檔名稱
+fn tmp_volume(p: &Path) -> PathBuf {
+    let mut name = p.file_name().unwrap_or_default().to_os_string();
+    name.push(".zipo-part");
+    p.with_file_name(name)
+}
+
+/// 壓縮成功：把暫存名稱的分割檔全部改成正式名稱，回傳所有分割檔
+pub(crate) fn finish_volumes(output: &Path) -> Result<Vec<PathBuf>> {
+    let first = first_volume(output);
+    let parts: Vec<PathBuf> = (1..).map(|n| volume_path(&first, n)).take_while(|p| tmp_volume(p).is_file()).collect();
+    for p in &parts {
+        std::fs::rename(tmp_volume(p), p)?;
+    }
+    Ok(parts)
+}
+
+/// 壓縮失敗或取消：刪除寫到一半的分割檔
+pub(crate) fn discard_volumes(output: &Path) {
+    let first = first_volume(output);
+    for p in (1..).map(|n| volume_path(&first, n)).take_while(|p| tmp_volume(p).is_file()) {
+        let _ = std::fs::remove_file(tmp_volume(&p));
+    }
+}
+
 /// 把 `path` 切成每個 `size` 位元組的分割檔，完成後刪除原檔；回傳所有分割檔。
 /// 回報進度、可以取消；分割檔先以暫存名稱寫入，全部完成才改成正式名稱，
 /// 中途失敗、取消或程式被結束時不會留下看似完整、其實缺檔的分割檔。
+#[cfg(test)]
 pub(crate) fn split(path: &Path, size: u64, progress: &dyn crate::Progress) -> Result<Vec<PathBuf>> {
     if size == 0 {
         return Err(Error::Unsupported(L!("分割大小不可為 0", "The volume size cannot be 0").into()));
@@ -352,6 +499,44 @@ mod tests {
         assert!(matches!(split(&f, 1_000_000, &stop), Err(Error::Cancelled)));
         let left: Vec<String> = std::fs::read_dir(tmp.path()).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
         assert_eq!(left, ["p.zip"], "取消後只剩原檔：{left:?}");
+    }
+
+    /// 直接寫入分割檔：可以移回前面改寫（跨越兩個分割檔也正確），完成後才出現正式名稱
+    #[test]
+    fn volume_writer_handles_seek_back_across_volumes() {
+        use std::io::Seek;
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("w.zip");
+        let mut w = OutFile::create(&tmp.path().join("w.zip.part"), &out, Some(100)).unwrap();
+        let data: Vec<u8> = (0..250u32).map(|i| i as u8).collect();
+        w.write_all(&data).unwrap();
+        // 回頭改寫第 50～149 位元組（橫跨 .001 與 .002）
+        w.seek(io::SeekFrom::Start(50)).unwrap();
+        w.write_all(&[0xAA; 100]).unwrap();
+        assert_eq!(w.seek(io::SeekFrom::End(0)).unwrap(), 250);
+        w.write_all(&[1, 2, 3]).unwrap();
+        w.flush().unwrap();
+        drop(w);
+        assert!(!tmp.path().join("w.zip.001").exists(), "完成前不可出現正式名稱");
+        let parts = finish_volumes(&out).unwrap();
+        assert_eq!(parts.len(), 3);
+        let mut joined = Vec::new();
+        for p in &parts {
+            joined.extend(std::fs::read(p).unwrap());
+        }
+        let mut want = data.clone();
+        want[50..150].fill(0xAA);
+        want.extend([1, 2, 3]);
+        assert_eq!(joined, want);
+        assert_eq!(std::fs::metadata(&parts[0]).unwrap().len(), 100);
+
+        // 失敗時刪除寫到一半的分割檔
+        let mut w = OutFile::create(&tmp.path().join("x.part"), &tmp.path().join("x.zip"), Some(100)).unwrap();
+        w.write_all(&[0; 150]).unwrap();
+        drop(w);
+        discard_volumes(&tmp.path().join("x.zip"));
+        let left: Vec<String> = std::fs::read_dir(tmp.path()).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with("x.")).collect();
+        assert!(left.is_empty(), "{left:?}");
     }
 
     /// 兩個測試都會改變全域的「保留接合結果」設定，依序執行
