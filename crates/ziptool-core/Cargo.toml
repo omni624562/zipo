@@ -11,7 +11,7 @@ flate2 = "1.1.10"
 fs4 = "1.1.0"
 hadris-iso = "2.5"
 md-5 = "0.11"
-sevenz-rust2 = { version = "0.23.0", features = ["aes256", "compress"] }
+sevenz-rust2 = { version = "0.24.0", features = ["aes256", "compress"] }
 sha1 = "0.11"
 sha2 = "0.11"
 tar = "0.4.46"

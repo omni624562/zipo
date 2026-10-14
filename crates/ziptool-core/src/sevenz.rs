@@ -192,7 +192,12 @@ fn dict_size(level: u32) -> u64 {
 }
 
 /// 一個固實區塊最多放多少原始資料。區塊越大壓縮率越好，但解出單一檔案時要解碼的資料越多。
-const SOLID_BLOCK_BYTES: u64 = 256 << 20;
+/// 每個區塊結束時要等最慢的工作區塊壓完，其他核心閒置，所以區塊不宜太小；
+/// 同時處理中的資料量由壓縮函式庫限制（約每個執行緒一個工作區塊），與區塊大小無關。
+/// 實測 560 MB、等級 5、22 核心：256 MB 區塊 74 秒 → 1 GB 區塊 66 秒，壓縮檔大小相同。
+const SOLID_BLOCK_BYTES: u64 = 1 << 30;
+/// 決定工作區塊大小用：約這麼多資料平分給所有執行緒
+const SPLIT_BYTES: u64 = 256 << 20;
 const SOLID_BLOCK_FILES: usize = 10_000;
 
 /// 開始讀取時才開檔：固實區塊可能包含上萬個檔案，不能同時全部開啟。
@@ -221,12 +226,12 @@ pub(crate) fn compress(items: &[Item], out: crate::volume::OutFile, opts: &Compr
     let mut w = ArchiveWriter::new(BufWriter::new(out)).map_err(map_err)?;
     let level = opts.level.unwrap_or(5);
     // 每個執行緒約需「字典 × 12（比對結構）＋ 工作區塊」的記憶體（以工作區塊最大為字典 × 4 預留）。
-    // 固實區塊依序壓縮，區塊內的工作區塊才能平行處理：工作區塊依執行緒數平分固實區塊，
+    // 固實區塊依序壓縮，區塊內的工作區塊才能平行處理：工作區塊依執行緒數平分 SPLIT_BYTES，
     // 所有核心都有工作（原本固定為字典 × 4，一個區塊只能分給 4～8 個執行緒）；最小為字典大小。
     // 實測 580 MB、等級 5、22 核心：59 秒 → 約 40 秒，壓縮檔只大 0.1%。
     let dict = dict_size(level);
     let (threads, _mem) = crate::util::reserve_threads(dict * 12 + dict * 4);
-    let chunk = (SOLID_BLOCK_BYTES / u64::from(threads.max(1))).clamp(dict, dict * 4);
+    let chunk = (SPLIT_BYTES / u64::from(threads.max(1))).clamp(dict, dict * 4);
     let lzma2 = Lzma2Options::from_level_mt(level, threads, chunk);
     match &opts.password {
         Some(pw) => {
