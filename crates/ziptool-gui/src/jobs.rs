@@ -466,12 +466,8 @@ fn run(task: Task, s: &Shared) -> Result<Outcome, Error> {
                 return Err(e);
             }
             let prepared: Vec<PathBuf> = std::fs::read_dir(&dir).map(|d| d.flatten().map(|e| e.path()).collect()).unwrap_or_default();
-            Ok(Outcome {
-                title: L!("已準備好拖曳", "Ready to drag").into(),
-                message: L!("項目已解壓縮完成。請再把它們拖曳到目的地一次，這次會立即開始。", "The items have been extracted. Drag them to the destination once more; this time it starts immediately.").into(),
-                prepared,
-                ..Default::default()
-            })
+            // 不跳出對話框（會擋住拖曳）：由畫面重新選取這些項目並在狀態列提示
+            Ok(Outcome { prepared, ..Default::default() })
         }
         Task::OpenNested { archive, entry, strip, password } => {
             let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);

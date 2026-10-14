@@ -538,6 +538,8 @@ struct App {
     sort_asc: bool,
     addr: String,
     status_error: Option<String>,
+    /// 狀態列的提示（例如大型項目已準備好拖曳）；前往別處時清除
+    status_hint: Option<String>,
     cache: Option<ArchiveCache>,
     loading: Option<Loading>,
     dialog: Option<Dialog>,
@@ -623,6 +625,7 @@ impl App {
             sort_asc: true,
             addr: String::new(),
             status_error: None,
+            status_hint: None,
             cache: None,
             loading: None,
             dialog: None,
@@ -804,6 +807,7 @@ impl App {
 
     fn navigate(&mut self, loc: Location) {
         self.status_error = None;
+        self.status_hint = None;
         // 使用者已前往別處：放棄進行中的讀取，讀完也不會再跳回那個壓縮檔
         self.loading = None;
         let rows = match &loc {
@@ -1627,9 +1631,16 @@ impl App {
                     w.archive_stamp = file_stamp(archive);
                 }
             }
-            if let (Task::PrepareDrag { archive, entries, .. }, Ok(out)) = (&task, &res)
+            if let (Task::PrepareDrag { archive, entries, strip, .. }, Ok(out)) = (&task, &res)
                 && !out.prepared.is_empty()
             {
+                // 還在同一個位置：重新選取準備好的項目，直接再拖曳一次即可
+                if matches!(&self.loc, Location::Archive { path, inner } if path == archive && inner == strip) {
+                    self.sel = (0..self.rows.len()).filter(|&i| entries.contains(&self.inner_name(&self.rows[i]))).collect();
+                    self.anchor = self.sel.first().copied();
+                    self.scroll_to = self.anchor;
+                }
+                self.status_hint = Some(L!("已準備好，再拖曳一次即可立即開始", "Ready: drag again to start immediately").into());
                 let mut entries = entries.clone();
                 entries.sort();
                 self.drag_cache.push(DragCache { archive: archive.clone(), stamp: file_stamp(archive), entries, items: out.prepared.clone() });
@@ -2367,6 +2378,9 @@ impl App {
                 let has_size = self.sel.iter().any(|&i| self.rows[i].size.is_some_and(|s| s > 0));
                 let size = if has_size { F!("，{}", ", {}", human(size)) } else { String::new() };
                 ui.label(RichText::new(F!("已選取 {} 個項目{size}", "{} selected{size}", self.sel.len())).size(12.0).color(p.text2));
+            }
+            if let Some(h) = &self.status_hint {
+                ui.label(RichText::new(format!("{}  {h}", icon::CHECK_CIRCLE)).size(12.0).color(p.accent));
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if let (Location::Archive { .. }, Some(c)) = (&self.loc, &self.cache) {
@@ -4622,7 +4636,8 @@ mod drag_out_tests {
         assert!(app.dialog.is_none());
     }
 
-    /// 大型項目：先在背景準備（有進度），完成後再拖曳一次即可立即開始
+    /// 大型項目：先在背景準備（有進度），完成後再拖曳一次即可立即開始。
+    /// 完成時不跳出對話框（會擋住拖曳），改為重新選取這些項目並在狀態列提示
     #[test]
     fn large_items_are_prepared_in_background() {
         let t = tempfile::tempdir().unwrap();
@@ -4632,9 +4647,17 @@ mod drag_out_tests {
         app.sel = [i].into();
         assert!(app.prepare_drag_out(vec!["docs/a.txt".into()]).is_none());
         assert!(matches!(app.job.as_ref().map(|j| &j.task), Some(Task::PrepareDrag { .. })));
+        // 等待時選了別的項目
+        app.sel = [app.rows.iter().position(|r| r.name == "sub").unwrap()].into();
         load(&mut app, &ctx);
-        assert!(matches!(&app.dialog, Some(Dialog::Notice { title, .. }) if title == "已準備好拖曳"));
-        app.dialog = None;
+        assert!(app.dialog.is_none(), "不應跳出對話框");
+        assert_eq!(app.sel, [i].into(), "重新選取準備好的項目");
+        assert!(app.status_hint.as_deref().is_some_and(|h| h.contains("再拖曳一次")), "{:?}", app.status_hint);
+        // 前往別處後提示消失
+        app.navigate(Location::Archive { path: app.cache.as_ref().unwrap().path.clone(), inner: String::new() });
+        assert!(app.status_hint.is_none());
+        app.navigate(Location::Archive { path: app.cache.as_ref().unwrap().path.clone(), inner: "docs".into() });
+        app.sel = [i].into();
         let items = app.prepare_drag_out(vec!["docs/a.txt".into()]).expect("第二次應直接拖曳");
         assert!(app.job.is_none());
         assert_eq!(std::fs::read_to_string(&items[0]).unwrap(), "A");
@@ -4667,7 +4690,7 @@ mod drag_out_tests {
             app.poll(&ctx);
             std::thread::sleep(Duration::from_millis(20));
         }
-        assert!(matches!(&app.dialog, Some(Dialog::Notice { title, .. }) if title == "已準備好拖曳"));
+        assert!(app.dialog.is_none() && app.status_hint.is_some());
     }
 
     /// 同樣的項目不重複解壓縮；壓縮檔改變後重新解壓縮
