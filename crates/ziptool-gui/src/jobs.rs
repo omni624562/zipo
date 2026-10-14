@@ -31,6 +31,8 @@ pub enum Task {
     Test { archives: Vec<PathBuf>, password: Option<String> },
     /// 更新既有壓縮檔：加入檔案到 `into` 資料夾、刪除 `remove` 中的項目。
     Update { archive: PathBuf, add: Vec<PathBuf>, into: String, remove: Vec<String>, password: Option<String> },
+    /// 壓縮檔內重新命名：`from`、`to` 為壓縮檔內的完整名稱（資料夾連同其中的內容）
+    Rename { archive: PathBuf, from: String, to: String, password: Option<String> },
     /// 把壓縮檔內的單一檔案解到暫存資料夾後，用系統預設程式開啟。
     OpenInside { archive: PathBuf, entry: String, strip: String, password: Option<String> },
     /// 拖曳大型項目前，先在背景解到暫存資料夾（顯示進度），完成後再拖曳一次即可
@@ -52,6 +54,7 @@ impl Task {
             Task::OpenInside { .. } | Task::OpenNested { .. } => L!("正在開啟", "Opening"),
             Task::PrepareDrag { .. } => L!("正在準備拖曳", "Preparing to drag"),
             Task::Update { .. } => L!("正在更新壓縮檔", "Updating archive"),
+            Task::Rename { .. } => L!("正在重新命名", "Renaming"),
             Task::Hash { .. } | Task::HashInside { .. } => L!("正在計算雜湊值", "Calculating hashes"),
         }
     }
@@ -62,6 +65,7 @@ impl Task {
             Task::Test { password, .. }
             | Task::OpenInside { password, .. }
             | Task::Update { password, .. }
+            | Task::Rename { password, .. }
             | Task::HashInside { password, .. }
             | Task::OpenNested { password, .. }
             | Task::PrepareDrag { password, .. } => *password = Some(pw),
@@ -404,6 +408,13 @@ fn run(task: Task, s: &Shared) -> Result<Outcome, Error> {
                 issues: Vec::new(),
                 ..Default::default()
             })
+        }
+        Task::Rename { archive, from, to, password } => {
+            *lock(&s.stage) = file_name(&archive);
+            let opts = CompressOptions { password, ..Default::default() };
+            ziptool_core::rename(&archive, &from, &to, &opts, s)?;
+            // 與檔案總管相同：改好名稱就好，不另外通知
+            Ok(Outcome { refresh: true, ..Default::default() })
         }
         Task::Hash { inputs } => Ok(Outcome { hashes: ziptool_core::hash_files(&inputs, s)?, ..Default::default() }),
         Task::HashInside { archive, entries, strip, password } => {

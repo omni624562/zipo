@@ -33,7 +33,7 @@ use egui_phosphor::regular as icon;
 use ziptool_core::{Entry, Error, Format, Issue};
 
 use browser::{Location, Row, SortKey};
-use dialogs::{AddDialog, ExtractDialog, ExtractSource, Outcome, PasswordDialog, PasswordPurpose};
+use dialogs::{AddDialog, ExtractDialog, ExtractSource, Outcome, PasswordDialog, PasswordPurpose, RenameDialog};
 use jobs::{Job, Task, Then};
 use theme::pal;
 use widgets::*;
@@ -479,6 +479,7 @@ enum Dialog {
     Add(AddDialog),
     Extract(ExtractDialog),
     Password(PasswordDialog),
+    Rename(RenameDialog),
     Info { title: String, lines: Vec<(String, String)> },
     Notice { title: String, message: String, ok: bool, open_dir: Option<PathBuf>, issues: Vec<Issue> },
     /// 壓縮比異常高，確認後才解壓
@@ -523,6 +524,7 @@ enum Action {
     Test,
     Info,
     Delete,
+    Rename,
     Hash,
 }
 
@@ -1227,6 +1229,24 @@ impl App {
         self.dialog = Some(Dialog::ConfirmUpdate { task, title: L!("從壓縮檔刪除", "Delete from archive").into(), message, danger: true });
     }
 
+    /// 壓縮檔內重新命名（F2）：一次一個項目，資料夾連同其中的內容
+    fn cmd_rename(&mut self) {
+        let Location::Archive { path, inner } = self.loc.clone() else { return };
+        if let Some(why) = self.read_only_reason() {
+            return self.notice(L!("重新命名", "Rename"), why);
+        }
+        if Format::detect(&path).is_ok_and(|f| f.is_single()) {
+            return self.notice(L!("重新命名", "Rename"), L!("這種格式只能包含單一檔案，無法重新命名其中的項目。", "This format contains only a single file; its contents cannot be renamed."));
+        }
+        let &[i] = self.sel.iter().copied().collect::<Vec<_>>().as_slice() else {
+            return self.notice(L!("重新命名", "Rename"), L!("請只選取一個要重新命名的項目。", "Select only one item to rename."));
+        };
+        let old = self.rows[i].name.clone();
+        let taken = self.rows.iter().filter(|r| r.name != old).map(|r| r.name.clone()).collect();
+        let password = self.cache.as_ref().and_then(|c| c.password.clone());
+        self.dialog = Some(Dialog::Rename(RenameDialog::new(path, inner, old, taken, password)));
+    }
+
     /// 資料夾中的刪除：與檔案總管相同，移到資源回收筒（可以還原，所以不另外確認）；
     /// 無法回收的位置（網路磁碟等）由 Windows 先警告
     fn recycle_selected(&mut self) {
@@ -1359,6 +1379,7 @@ impl App {
             Action::Test => self.cmd_test(),
             Action::Info => self.cmd_info(),
             Action::Delete => self.cmd_delete(),
+            Action::Rename => self.cmd_rename(),
             Action::Hash => self.cmd_hash(),
         }
     }
@@ -1585,7 +1606,7 @@ impl App {
                 self.watch(archive.clone(), entry.clone(), file.clone(), password.clone());
             }
             // Zipo 自己更新了壓縮檔（存回、加入、刪除）：不算被其他程式取代
-            if let (Task::Update { archive, .. }, Ok(_)) = (&task, &res) {
+            if let (Task::Update { archive, .. } | Task::Rename { archive, .. }, Ok(_)) = (&task, &res) {
                 for w in self.watched.iter_mut().filter(|w| &w.archive == archive) {
                     w.archive_stamp = file_stamp(archive);
                 }
@@ -1638,7 +1659,7 @@ impl App {
                         Task::Extract { archives, .. } | Task::Test { archives, .. } => file_name(&archives[0]),
                         Task::OpenInside { archive, .. } | Task::OpenNested { archive, .. } | Task::PrepareDrag { archive, .. } => file_name(archive),
                         Task::Compress { output, .. } => file_name(output),
-                        Task::Update { archive, .. } | Task::HashInside { archive, .. } => file_name(archive),
+                        Task::Update { archive, .. } | Task::Rename { archive, .. } | Task::HashInside { archive, .. } => file_name(archive),
                         Task::Hash { inputs } => inputs.first().map(|p| file_name(p)).unwrap_or_default(),
                     };
                     self.dialog = Some(Dialog::Password(PasswordDialog::new(
@@ -2238,6 +2259,9 @@ impl App {
                         if in_archive && !nested && ui.button(F!("{}  從壓縮檔刪除", "{}  Delete from archive", icon::TRASH)).clicked() {
                             ctx_action = Some(Action::Delete);
                         }
+                        if in_archive && !nested && ui.button(F!("{}  重新命名", "{}  Rename", icon::PENCIL_SIMPLE)).clicked() {
+                            ctx_action = Some(Action::Rename);
+                        }
                         if !in_archive && !r.is_drive && ui.button(F!("{}  刪除", "{}  Delete", icon::TRASH)).on_hover_text(L!("移到資源回收筒，可以還原", "Move to the Recycle Bin; it can be restored")).clicked() {
                             ctx_action = Some(Action::Delete);
                         }
@@ -2374,6 +2398,9 @@ impl App {
         }
         if ctx.input(|i| i.key_pressed(Key::Delete)) && !matches!(self.loc, Location::Computer) && !self.sel.is_empty() {
             return self.cmd_delete();
+        }
+        if ctx.input(|i| i.key_pressed(Key::F2)) && matches!(self.loc, Location::Archive { .. }) && !self.sel.is_empty() {
+            return self.cmd_rename();
         }
         if ctx.input(|i| i.modifiers.alt && i.key_pressed(Key::P)) {
             self.preview_open = !self.preview_open;
@@ -2536,6 +2563,14 @@ impl App {
                 Outcome::Ok(task) => {
                     keep = false;
                     self.open_after = d.open_folder;
+                    self.spawn(task);
+                }
+            },
+            Dialog::Rename(d) => match d.ui(ui) {
+                Outcome::Pending => {}
+                Outcome::Cancel => keep = false,
+                Outcome::Ok(task) => {
+                    keep = false;
                     self.spawn(task);
                 }
             },
@@ -3237,6 +3272,10 @@ impl App {
                         self.watched.push(Watched { archive: "專案資料.zip".into(), entry: "報告.docx".into(), file, stamp: None, archive_stamp: None, password: None });
                         self.dialog = Some(Dialog::SaveBack(0));
                     }
+                    "rename" => {
+                        let taken = vec!["期末報告.pdf".into()];
+                        self.dialog = Some(Dialog::Rename(RenameDialog::new("專案資料.zip".into(), String::new(), "期末報告.docx".into(), taken, None)));
+                    }
                     "hash" => {
                         let h = ziptool_core::hash_reader(&mut &b"abc"[..], &ziptool_core::NoProgress).unwrap();
                         let rows = vec![("zipo-0.3.1-windows-x64.zip".into(), h.clone()), ("說明文件.pdf".into(), h)];
@@ -3855,6 +3894,90 @@ mod update_tests {
         assert_eq!(names(&app), ["b.txt", "new.txt"]);
         let all: Vec<String> = ziptool_core::list(&ar, None).unwrap().into_iter().map(|e| e.name).collect();
         assert!(all.contains(&"proj/docs/new.txt".to_string()), "{all:?}");
+    }
+
+    fn press(app: &mut App, ctx: &egui::Context, key: Key) {
+        let ev = egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE };
+        let mut out = ctx.run_ui(egui::RawInput { events: vec![ev], ..Default::default() }, |ui| app.keyboard(ui.ctx()));
+        out.textures_delta.clear();
+    }
+
+    /// 對話框跑一個畫面；`enter` 為按下 Enter
+    fn dialog_frame(app: &mut App, ctx: &egui::Context, enter: bool) {
+        let events = if enter { vec![egui::Event::Key { key: Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }] } else { Vec::new() };
+        let mut out = ctx.run_ui(egui::RawInput { events, ..Default::default() }, |ui| app.dialogs(ui.ctx()));
+        out.textures_delta.clear();
+    }
+
+    /// 壓縮檔內按 F2 重新命名：名稱預設為原名，改好按 Enter 即完成（與檔案總管相同，不另外通知）
+    #[test]
+    fn rename_inside_archive_with_f2() {
+        let t = tempfile::tempdir().unwrap();
+        let root = real_path(t.path());
+        let src = root.join("proj");
+        std::fs::create_dir_all(src.join("docs/sub")).unwrap();
+        std::fs::write(src.join("docs/a.txt"), "a").unwrap();
+        std::fs::write(src.join("docs/b.txt"), "b").unwrap();
+        std::fs::write(src.join("docs/sub/c.txt"), "c").unwrap();
+        let ar = root.join("p.zip");
+        ziptool_core::compress(&[src], &ar, Format::Zip, &Default::default(), &ziptool_core::NoProgress).unwrap();
+
+        let ctx = egui::Context::default();
+        theme::setup(&ctx);
+        let mut app = App::new(Some(ar.clone()));
+        load(&mut app, &ctx);
+        app.navigate(Location::Archive { path: ar.clone(), inner: "proj/docs".into() });
+        assert_eq!(names(&app), ["sub", "a.txt", "b.txt"]);
+
+        // 沒有選取或選了多個：不能重新命名
+        app.sel.clear();
+        press(&mut app, &ctx, Key::F2);
+        assert!(app.dialog.is_none());
+        app.sel = [1, 2].into();
+        app.cmd_rename();
+        assert!(matches!(app.dialog, Some(Dialog::Notice { .. })), "選了多個時說明原因");
+        app.dialog = None;
+
+        app.sel = [1].into();
+        press(&mut app, &ctx, Key::F2);
+        let Some(Dialog::Rename(d)) = &mut app.dialog else { panic!("F2 應出現重新命名") };
+        assert_eq!(d.name, "a.txt");
+        // 不能用的名稱：空白、含路徑符號、同一資料夾已有（不分大小寫）
+        for bad in ["", "  ", "x/y.txt", "x\\y.txt", "..", "B.TXT", "sub"] {
+            d.name = bad.into();
+            assert!(d.problem().is_some(), "{bad:?}");
+        }
+        d.name = "A.TXT".into();
+        assert!(d.problem().is_none(), "只改大小寫可以");
+        // 名稱不能用時按 Enter 不會送出
+        d.name = "b.txt".into();
+        dialog_frame(&mut app, &ctx, false);
+        dialog_frame(&mut app, &ctx, true);
+        assert!(matches!(app.dialog, Some(Dialog::Rename(_))), "名稱重複時應留在對話框");
+        let Some(Dialog::Rename(d)) = &mut app.dialog else { unreachable!() };
+        d.name = "新名稱.txt".into();
+        dialog_frame(&mut app, &ctx, true);
+        load(&mut app, &ctx);
+        assert!(app.dialog.is_none(), "完成後不另外通知");
+        assert_eq!(names(&app), ["sub", "b.txt", "新名稱.txt"]);
+
+        // 資料夾連同內容一起改名（右鍵選單）
+        app.sel = [0].into();
+        app.run_action(Action::Rename);
+        let Some(Dialog::Rename(d)) = &mut app.dialog else { panic!("應出現重新命名") };
+        d.name = "子資料夾".into();
+        dialog_frame(&mut app, &ctx, false);
+        dialog_frame(&mut app, &ctx, true);
+        load(&mut app, &ctx);
+        let mut all: Vec<String> = ziptool_core::list(&ar, None).unwrap().into_iter().filter(|e| !e.is_dir).map(|e| e.name).collect();
+        all.sort();
+        assert_eq!(all, ["proj/docs/b.txt", "proj/docs/子資料夾/c.txt", "proj/docs/新名稱.txt"]);
+
+        // 分割的壓縮檔等無法修改：說明原因
+        app.nested.push(Nested { path: ar.clone(), parent: Location::Dir(root.clone()) });
+        app.sel = [0].into();
+        app.cmd_rename();
+        assert!(matches!(app.dialog, Some(Dialog::Notice { .. })));
     }
 
     /// 加入檔案到加密的 zip：先要求密碼，輸入後新檔案也加密

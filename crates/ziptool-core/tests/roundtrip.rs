@@ -1044,6 +1044,35 @@ fn split_volumes_keep_mark_of_the_web() {
     assert!(fs::read_to_string(got).unwrap().contains("ZoneId=3"));
 }
 
+/// 壓縮檔內重新命名：檔案與資料夾（連同其中的內容）都可以；內容不變；名稱重複或找不到時拒絕
+#[test]
+fn rename_inside_archive() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    fs::create_dir_all(src.join("docs/sub")).unwrap();
+    fs::write(src.join("docs/a.txt"), "A").unwrap();
+    fs::write(src.join("docs/sub/b.txt"), "B").unwrap();
+    fs::write(src.join("top.txt"), "T").unwrap();
+    for f in [Format::Zip, Format::SevenZ, Format::TarGz] {
+        let ar = tmp.path().join(format!("r.{}", f.extension()));
+        compress(&[src.join("docs"), src.join("top.txt")], &ar, f, &CompressOptions::default(), &NoProgress).unwrap();
+        ziptool_core::rename(&ar, "top.txt", "首頁.txt", &CompressOptions::default(), &NoProgress).unwrap();
+        ziptool_core::rename(&ar, "docs", "文件", &CompressOptions::default(), &NoProgress).unwrap();
+        let mut names: Vec<String> = list(&ar, None).unwrap().into_iter().filter(|e| !e.is_dir).map(|e| e.name).collect();
+        names.sort();
+        assert_eq!(names, ["文件/a.txt", "文件/sub/b.txt", "首頁.txt"], "{f:?}");
+        let out = tmp.path().join(format!("out-{}", f.extension()));
+        extract(&ar, &out, &ExtractOptions::default(), &NoProgress).unwrap();
+        assert_eq!(fs::read_to_string(out.join("文件/sub/b.txt")).unwrap(), "B", "{f:?}");
+        assert_eq!(fs::read_to_string(out.join("首頁.txt")).unwrap(), "T", "{f:?}");
+        // 找不到、名稱已存在：拒絕且不改動
+        assert!(ziptool_core::rename(&ar, "沒有.txt", "x.txt", &CompressOptions::default(), &NoProgress).is_err(), "{f:?}");
+        assert!(ziptool_core::rename(&ar, "首頁.txt", "文件", &CompressOptions::default(), &NoProgress).is_err(), "{f:?}");
+        assert!(ziptool_core::rename(&ar, "首頁.txt", "../x.txt", &CompressOptions::default(), &NoProgress).is_err(), "{f:?}");
+        assert_eq!(list(&ar, None).unwrap().iter().filter(|e| !e.is_dir).count(), 3, "{f:?}");
+    }
+}
+
 /// 分割壓縮一次寫完：壓縮途中不會出現完整的壓縮檔（不需要兩倍的磁碟空間），
 /// 也不會先出現正式名稱的分割檔；取消時不留下任何檔案
 #[test]

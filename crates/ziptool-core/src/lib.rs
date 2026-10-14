@@ -287,6 +287,45 @@ pub fn update(
     opts: &CompressOptions,
     progress: &dyn Progress,
 ) -> Result<()> {
+    modify(archive, add, into, remove, None, opts, progress)
+}
+
+/// 壓縮檔內重新命名：`from` 為項目的完整名稱（資料夾連同其中的內容），`to` 為新的完整名稱。
+/// 找不到 `from`、`to` 已存在或名稱不合法時拒絕，壓縮檔不變。
+pub fn rename(archive: &Path, from: &str, to: &str, opts: &CompressOptions, progress: &dyn Progress) -> Result<()> {
+    let (from, to) = (util::normalize_name(from), util::normalize_name(to));
+    if from.is_empty() || to.is_empty() || to.split('/').any(|p| p.is_empty() || p == "." || p == "..") {
+        return Err(Error::Unsupported(L!("名稱不正確，請換一個名稱", "The name is not valid; choose another name").into()));
+    }
+    if from == to {
+        return Ok(());
+    }
+    let names: Vec<String> = list(archive, opts.password.as_deref())?.into_iter().map(|e| util::normalize_name(&e.name)).collect();
+    let under = |n: &str, p: &str| n == p || n.starts_with(&format!("{p}/"));
+    if !names.iter().any(|n| under(n, &from)) {
+        return Err(Error::Unsupported(F!("壓縮檔中找不到「{from}」", "\"{from}\" was not found in the archive")));
+    }
+    if names.iter().any(|n| under(n, &to)) {
+        return Err(Error::Unsupported(F!("壓縮檔中已有「{to}」，請換一個名稱", "\"{to}\" already exists in the archive; choose another name")));
+    }
+    modify(archive, &[], "", &[], Some((&from, &to)), opts, progress)
+}
+
+/// 加入、刪除與重新命名共用：zip 直接複製原有項目，其他格式解出後重新壓縮
+fn modify(
+    archive: &Path,
+    add: &[PathBuf],
+    into: &str,
+    remove: &[String],
+    rename: Option<(&str, &str)>,
+    opts: &CompressOptions,
+    progress: &dyn Progress,
+) -> Result<()> {
+    // 新名稱：`from` 本身或其下的項目換成 `to`
+    let renamed = |n: &str| -> Option<String> {
+        let (from, to) = rename?;
+        if n == from { Some(to.to_string()) } else { n.strip_prefix(&format!("{from}/")).map(|rest| format!("{to}/{rest}")) }
+    };
     if volume::is_first_volume(archive) {
         return Err(Error::Unsupported(L!("分割的壓縮檔無法直接修改；請先解壓縮，再重新壓縮", "Split archives cannot be modified directly; extract and compress again").into()));
     }
@@ -319,7 +358,7 @@ pub fn update(
     let res = (|| -> Result<()> {
         if format == Format::Zip {
             progress.start(util::total_size(&items));
-            return zip_fmt::update(archive, &part, &items, drop, opts, progress);
+            return zip_fmt::update(archive, &part, &items, drop, &renamed, opts, progress);
         }
         // 解到同一磁碟上的暫存資料夾，與新項目一起重新壓縮
         let mut tmp_name = archive.file_name().unwrap_or_default().to_os_string();
@@ -344,6 +383,11 @@ pub fn update(
                 return Err(Error::Unsupported(F!(
                     "壓縮檔中的「{lost}」無法在這台電腦上原樣保存（例如名稱只差大小寫、含有不允許的字元或是保留名稱），為避免遺失資料，無法加入或刪除項目", "\"{lost}\" in the archive cannot be stored as-is on this computer (for example, names differing only in case, disallowed characters or reserved names); to avoid losing data, items cannot be added or deleted"
                 )));
+            }
+            for it in &mut all {
+                if let Some(n) = renamed(&it.name) {
+                    it.name = n;
+                }
             }
             all.extend(items.iter().map(|i| util::Item { path: i.path.clone(), name: i.name.clone(), ..*i }));
             let mut o = opts.clone();

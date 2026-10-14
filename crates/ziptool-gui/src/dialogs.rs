@@ -563,6 +563,76 @@ impl PasswordDialog {
     }
 }
 
+/// 壓縮檔內重新命名（F2）：與檔案總管相同，一開始選取主檔名
+pub struct RenameDialog {
+    archive: PathBuf,
+    /// 項目所在的資料夾（壓縮檔內的路徑，最上層為空字串）
+    folder: String,
+    old: String,
+    pub name: String,
+    /// 同一資料夾中其他項目的名稱
+    taken: Vec<String>,
+    password: Option<String>,
+    focused: bool,
+}
+
+impl RenameDialog {
+    pub fn new(archive: PathBuf, folder: String, old: String, taken: Vec<String>, password: Option<String>) -> Self {
+        Self { archive, folder, name: old.clone(), old, taken, password, focused: false }
+    }
+
+    /// 新名稱不能用的原因
+    pub fn problem(&self) -> Option<&'static str> {
+        let n = self.name.trim();
+        if n.is_empty() {
+            Some(L!("請輸入名稱", "Enter a name"))
+        } else if n.contains(['/', '\\']) || n == "." || n == ".." {
+            Some(L!("名稱不能包含 / 或 \\", "The name cannot contain / or \\"))
+        } else if self.taken.iter().any(|t| t.to_lowercase() == n.to_lowercase()) {
+            Some(L!("這個資料夾中已有同名的項目", "An item with this name already exists in this folder"))
+        } else {
+            None
+        }
+    }
+
+    pub fn ui(&mut self, ui: &mut egui::Ui) -> Outcome<Task> {
+        let p = pal(ui);
+        ui.set_width(380.0);
+        dialog_title(ui, icon::PENCIL_SIMPLE, L!("重新命名", "Rename"));
+        ui.label(RichText::new(&self.old).color(p.text2));
+        ui.add_space(6.0);
+        let r = ui.add(egui::TextEdit::singleline(&mut self.name).desired_width(f32::INFINITY));
+        if !self.focused {
+            self.focused = true;
+            r.request_focus();
+            // 選取主檔名（不含副檔名），直接打字就能換掉
+            let stem = match self.old.rfind('.') {
+                Some(i) if i > 0 => self.old[..i].chars().count(),
+                _ => self.old.chars().count(),
+            };
+            if let Some(mut st) = egui::TextEdit::load_state(ui.ctx(), r.id) {
+                let range = egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(stem));
+                st.cursor.set_char_range(Some(range));
+                st.store(ui.ctx(), r.id);
+            }
+        }
+        let problem = self.problem();
+        if let Some(why) = problem {
+            error_text(ui, why);
+        }
+        let (ok, cancel) = dialog_buttons(ui, L!("重新命名", "Rename"));
+        let name = self.name.trim();
+        if cancel || (ok && name == self.old) {
+            Outcome::Cancel
+        } else if ok && problem.is_none() {
+            let full = |n: &str| if self.folder.is_empty() { n.to_string() } else { format!("{}/{n}", self.folder) };
+            Outcome::Ok(Task::Rename { archive: self.archive.clone(), from: full(&self.old), to: full(name), password: self.password.clone() })
+        } else {
+            Outcome::Pending
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

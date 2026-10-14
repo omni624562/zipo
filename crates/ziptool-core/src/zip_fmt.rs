@@ -24,6 +24,7 @@ pub(crate) fn update(
     output: &Path,
     items: &[Item],
     drop: impl Fn(&str) -> bool,
+    rename: &dyn Fn(&str) -> Option<String>,
     opts: &CompressOptions,
     progress: &dyn Progress,
 ) -> Result<()> {
@@ -39,7 +40,12 @@ pub(crate) fn update(
             continue;
         }
         progress.entry(&name);
-        zip.raw_copy_file(f)?;
+        // 重新命名：直接複製壓縮後的資料，只換名稱（資料夾項目保留結尾的 /）
+        match rename(&crate::util::normalize_name(&name)) {
+            Some(new) if f.is_dir() => zip.raw_copy_file_rename(f, format!("{new}/"))?,
+            Some(new) => zip.raw_copy_file_rename(f, new)?,
+            None => zip.raw_copy_file(f)?,
+        }
     }
     write_items(&mut zip, items, opts, progress)?;
     zip.finish()?.flush()?;
