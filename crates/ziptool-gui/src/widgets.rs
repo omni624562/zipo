@@ -183,15 +183,21 @@ pub fn elided_label(ui: &mut egui::Ui, text: &str, size: f32, color: egui::Color
 pub fn path_field(ui: &mut egui::Ui, lead: &str, value: &mut String) -> bool {
     let mut clicked = false;
     let edit_id = ui.id().with(("path_field", lead));
-    let editing = ui.data(|d| d.get_temp::<bool>(edit_id)).unwrap_or(false);
+    // 0：顯示中；1：剛點下去，下一個畫面建立輸入框時才給焦點；2：編輯中
+    // （焦點不可先交給還沒出現的輸入框：輔助使用程式找不到焦點所在的元件會讓程式當掉）
+    let state = ui.data(|d| d.get_temp::<u8>(edit_id)).unwrap_or(0);
+    let editing = state > 0;
     input_frame(ui, lead, |ui| {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             clicked = link(ui, L!("瀏覽…", "Browse…")).clicked();
             ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                 if editing {
                     let r = ui.add(egui::TextEdit::singleline(value).id(edit_id).frame(egui::Frame::NONE).desired_width(ui.available_width()));
-                    if r.lost_focus() {
-                        ui.data_mut(|d| d.insert_temp(edit_id, false));
+                    if state == 1 {
+                        r.request_focus();
+                        ui.data_mut(|d| d.insert_temp(edit_id, 2u8));
+                    } else if r.lost_focus() || !r.has_focus() {
+                        ui.data_mut(|d| d.insert_temp(edit_id, 0u8));
                     }
                 } else {
                     let font = TextStyle::Body.resolve(ui.style());
@@ -202,8 +208,8 @@ pub fn path_field(ui: &mut egui::Ui, lead: &str, value: &mut String) -> bool {
                     let r = if r.rect.width() > 0.0 && shown_differs(value, max, ui) { r.on_hover_text(value.as_str()) } else { r };
                     // 點整個欄位都能開始編輯
                     if r.clicked() || ui.interact(ui.max_rect(), edit_id.with("area"), Sense::click()).clicked() {
-                        ui.data_mut(|d| d.insert_temp(edit_id, true));
-                        ui.memory_mut(|m| m.request_focus(edit_id));
+                        ui.data_mut(|d| d.insert_temp(edit_id, 1u8));
+                        ui.ctx().request_repaint();
                     }
                 }
             });
@@ -369,6 +375,8 @@ mod tests {
     #[test]
     fn path_field_becomes_editable_on_click() {
         let ctx = egui::Context::default();
+        // 啟用輔助使用資訊：有螢幕報讀等程式讀取畫面時，回報的焦點必須是這個畫面上存在的元件，否則程式會當掉
+        ctx.enable_accesskit();
         let mut value = r"C:\Users\nan\AppData\Local\Temp\claude\很長的資料夾名稱\再一層\out".to_string();
         let frame = |events: Vec<egui::Event>, value: &mut String| {
             let raw = egui::RawInput {
@@ -380,6 +388,8 @@ mod tests {
                 path_field(ui, "", value);
             });
             out.textures_delta.clear();
+            let tree = out.platform_output.accesskit_update.unwrap();
+            assert!(tree.nodes.iter().any(|(id, _)| *id == tree.focus), "焦點所在的元件不在畫面上（會讓輔助使用程式當掉）");
         };
         frame(vec![], &mut value);
         let at = egui::pos2(60.0, 16.0);
