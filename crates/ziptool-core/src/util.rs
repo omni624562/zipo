@@ -574,11 +574,19 @@ pub(crate) fn decode_zip_name(raw: &[u8], fallback: &str) -> String {
     fallback.to_string()
 }
 
-/// 壓縮時可使用的記憶體預算：實體記憶體的一半；32 位元程式最多只能定址約 4 GB，再限制在 1.5 GB。
+/// 壓縮時可使用的記憶體預算：實體記憶體的一半，但不超過目前可用的記憶體；
+/// 32 位元程式最多只能定址約 4 GB，再限制在 1.5 GB。
 /// 高壓縮等級的 LZMA 每個執行緒要將近 1 GB，只依 CPU 核心數開執行緒會耗盡記憶體而當掉。
 pub(crate) fn memory_budget() -> u64 {
-    let half = physical_memory().unwrap_or(4 << 30) / 2;
-    if cfg!(target_pointer_width = "32") { half.min(1536 << 20) } else { half }
+    let (total, avail) = physical_memory().unwrap_or((4 << 30, 4 << 30));
+    budget_from(total, avail, cfg!(target_pointer_width = "32"))
+}
+
+/// 其他程式佔用很多記憶體時，依總量開執行緒會配置失敗而當掉，所以以可用的為上限；
+/// 至少保留 256 MB，記憶體很少時仍能以單執行緒進行
+fn budget_from(total: u64, avail: u64, is_32bit: bool) -> u64 {
+    let budget = (total / 2).min(avail).max(256 << 20);
+    if is_32bit { budget.min(1536 << 20) } else { budget }
 }
 
 /// 剩餘預算可容納的執行緒數：至少 1 個（預算用完也要能進行）、最多 `cores` 個
@@ -618,8 +626,9 @@ pub(crate) fn reserve_threads(per_thread: u64) -> (u32, MemoryReservation) {
     }
 }
 
+/// 實體記憶體的總量與目前可用的量
 #[cfg(windows)]
-fn physical_memory() -> Option<u64> {
+fn physical_memory() -> Option<(u64, u64)> {
     #[repr(C)]
     struct MemoryStatusEx {
         length: u32,
@@ -647,18 +656,18 @@ fn physical_memory() -> Option<u64> {
         avail_extended_virtual: 0,
     };
     // SAFETY: 傳入大小正確、已設定 length 的結構
-    (unsafe { GlobalMemoryStatusEx(&mut m) } != 0).then_some(m.total_phys)
+    (unsafe { GlobalMemoryStatusEx(&mut m) } != 0).then_some((m.total_phys, m.avail_phys))
 }
 
 #[cfg(target_os = "linux")]
-fn physical_memory() -> Option<u64> {
+fn physical_memory() -> Option<(u64, u64)> {
     let info = std::fs::read_to_string("/proc/meminfo").ok()?;
-    let kb: u64 = info.lines().find(|l| l.starts_with("MemTotal:"))?.split_whitespace().nth(1)?.parse().ok()?;
-    Some(kb * 1024)
+    let read = |key: &str| -> Option<u64> { Some(info.lines().find(|l| l.starts_with(key))?.split_whitespace().nth(1)?.parse::<u64>().ok()? * 1024) };
+    Some((read("MemTotal:")?, read("MemAvailable:")?))
 }
 
 #[cfg(not(any(windows, target_os = "linux")))]
-fn physical_memory() -> Option<u64> {
+fn physical_memory() -> Option<(u64, u64)> {
     None
 }
 
@@ -759,6 +768,16 @@ mod tests {
         assert_eq!(plan_threads(4 * GB, GB, GB, 16), 3);
         // 32 位元的預算（1.5 GB）下，最高等級 7z（字典 64 MB，每執行緒約 1 GB）只能單執行緒
         assert_eq!(plan_threads(1536 << 20, 0, (64 << 20) * 16, 16), 1);
+    }
+
+    /// 其他程式佔用很多記憶體時，預算以目前可用的為上限（依總量開執行緒會配置失敗而當掉）
+    #[test]
+    fn budget_respects_available_memory() {
+        const GB: u64 = 1 << 30;
+        assert_eq!(budget_from(32 * GB, 30 * GB, false), 16 * GB, "可用的夠多：實體記憶體的一半");
+        assert_eq!(budget_from(32 * GB, 5 * GB, false), 5 * GB, "可用的不多：以可用的為上限");
+        assert_eq!(budget_from(32 * GB, 30 * GB, true), 1536 << 20, "32 位元最多 1.5 GB");
+        assert_eq!(budget_from(32 * GB, 0, false), 256 << 20, "至少保留一點，仍能以單執行緒進行");
     }
 
     /// 同時進行的工作共用記憶體預算：預算被占用時，後來的工作只能用較少的執行緒；歸還後恢復
