@@ -1,5 +1,6 @@
 # 每次推送與 Pull Request：在三個平台跑測試與 clippy，並檢查第三方套件的已知漏洞。
-# Windows 另外測試 32 位元與 Arm64（原生 Arm 執行器），以及 release 設定下的 clippy。
+# Windows 另外測試 32 位元與 Arm64（原生 Arm 執行器），以及 release 設定下的 clippy；
+# 另外截取 GUI 畫面，並檢查 winget 上架檔案。
 # 第三方 actions 固定到 commit SHA（後面註明版本），標籤被改指向時不受影響。
 name: CI
 
@@ -66,11 +67,10 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-  # 試行：在沒有顯示卡的 Windows 執行器上截取 GUI 畫面（debug 版的截圖工具），結果以 artifact 下載檢查。
-  # 執行器能否畫出視窗仍待確認，失敗時不影響 CI 結果。
+  # 截取 GUI 畫面（debug 版的截圖工具），以 artifact 上傳供檢查畫面：gh run download <run-id> -n screenshots
+  # 任何一個畫面沒有產生（程式當掉或卡住）時失敗
   screenshot:
     runs-on: windows-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
@@ -103,3 +103,17 @@ jobs:
         with:
           name: screenshots
           path: shots/
+
+  # 最新版本的 winget 上架檔案（packaging/winget）格式正確
+  winget:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: winget validate
+        shell: pwsh
+        run: |
+          $dir = Get-ChildItem packaging/winget/manifests/o/omni624562/Zipo -Directory | Sort-Object { [version]$_.Name } | Select-Object -Last 1
+          "檢查 $($dir.Name)"
+          winget --version
+          winget validate --manifest $dir.FullName
+          if ($LASTEXITCODE -ne 0) { exit 1 }
