@@ -37,7 +37,7 @@ cargo clippy --workspace --all-targets --release -- -D warnings
 
 - **單元測試**：用 `egui::Context` 直接跑畫面。要畫文字的測試先呼叫 `theme::setup(&ctx)`；修飾鍵用 `egui::Event::ModifiersChanged` 送出（`RawInput` 沒有 modifiers 欄位）；`ctx.enable_accesskit()` 後可從 `platform_output.accesskit_update` 找元件位置；每次執行後 `out.textures_delta.clear()`。
 - **截圖**：debug 版的截圖工具（`crates/ziptool-gui/src/devshot.rs`），以環境變數控制：`ZIPTOOL_SHOT=輸出.png`、`ZIPTOOL_SHOT_OPEN=路徑`、`ZIPTOOL_SHOT_SELECT=選取前幾列`、`ZIPTOOL_SHOT_DIALOG=add|extract|rename|menu|…`、`ZIPTOOL_SHOT_DARK=1`、`ZIPTOOL_SHOT_LANG=en|zh`。
-- **CI 截圖**：CI 的 screenshot 工作會截取資料夾、壓縮檔、加入（深色）、解壓縮（英文）四個畫面；改了畫面時下載來檢查：`gh run download <run-id> -n screenshots`。需要其他畫面時在 ci.yml 增加截圖項目。
+- **CI 截圖**：CI 的 screenshot 工作會截取資料夾（中文）、壓縮檔（英文）、加入（深色、中文）、解壓縮（英文）四個畫面；改了畫面時下載來檢查：`gh run download <run-id> -n screenshots`。需要其他畫面時在 ci.yml 增加截圖項目。
 - 不要用滑鼠自動化操作使用者的桌面；會寫登錄檔的功能只在測試機碼驗證。
 
 ## 只能在實體 Windows 桌面進行的檢查

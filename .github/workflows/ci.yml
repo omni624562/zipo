@@ -68,6 +68,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
   # 截取 GUI 畫面（debug 版的截圖工具），以 artifact 上傳供檢查畫面：gh run download <run-id> -n screenshots
+  # 每個畫面都指定語言（執行器的系統語言是英文），中英文介面都會截到
   # 任何一個畫面沒有產生（程式當掉或卡住）時失敗
   screenshot:
     runs-on: windows-latest
@@ -83,9 +84,9 @@ jobs:
           New-Item -ItemType Directory shots | Out-Null
           & target/debug/zipo.exe a sample.zip crates docs -bd | Out-Null
           $cases = @(
-            @{ Name = 'folder'; Env = @{ ZIPTOOL_SHOT_OPEN = "$PWD"; ZIPTOOL_SHOT_SELECT = '2' } },
-            @{ Name = 'archive'; Env = @{ ZIPTOOL_SHOT_OPEN = "$PWD\sample.zip" } },
-            @{ Name = 'add-dialog-dark'; Env = @{ ZIPTOOL_SHOT_OPEN = "$PWD"; ZIPTOOL_SHOT_SELECT = '2'; ZIPTOOL_SHOT_DIALOG = 'add'; ZIPTOOL_SHOT_DARK = '1' } },
+            @{ Name = 'folder'; Env = @{ ZIPTOOL_SHOT_OPEN = "$PWD"; ZIPTOOL_SHOT_SELECT = '2'; ZIPTOOL_SHOT_LANG = 'zh' } },
+            @{ Name = 'archive'; Env = @{ ZIPTOOL_SHOT_OPEN = "$PWD\sample.zip"; ZIPTOOL_SHOT_LANG = 'en' } },
+            @{ Name = 'add-dialog-dark'; Env = @{ ZIPTOOL_SHOT_OPEN = "$PWD"; ZIPTOOL_SHOT_SELECT = '2'; ZIPTOOL_SHOT_DIALOG = 'add'; ZIPTOOL_SHOT_DARK = '1'; ZIPTOOL_SHOT_LANG = 'zh' } },
             @{ Name = 'extract-dialog-en'; Env = @{ ZIPTOOL_SHOT_OPEN = "$PWD\sample.zip"; ZIPTOOL_SHOT_DIALOG = 'extract'; ZIPTOOL_SHOT_LANG = 'en' } }
           )
           $failed = 0
