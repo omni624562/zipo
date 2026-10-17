@@ -249,7 +249,9 @@ pub(crate) fn list(archive: &Path) -> Result<Vec<Entry>> {
 
 /// 項目名稱：沒有 UTF-8 標記的舊式 zip（例如 Windows 內建壓縮產生、含中文檔名）依字碼頁解碼。
 fn entry_name<R: Read + ?Sized>(f: &zip::read::ZipFile<'_, R>) -> String {
-    decode_zip_name(f.name_raw(), f.name())
+    // zip 9 起 name() 回傳 Result（目前的實作實際上不會失敗）；萬一失敗改用原始位元組，不讓整個壓縮檔打不開
+    let fallback = f.name().map(|n| n.into_owned()).unwrap_or_else(|_| String::from_utf8_lossy(f.name_raw()).into_owned());
+    decode_zip_name(f.name_raw(), &fallback)
 }
 
 fn map_err(e: ZipError) -> Error {

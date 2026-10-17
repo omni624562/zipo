@@ -18,11 +18,11 @@ tar = "0.4.46"
 time = { version = "0.3.55", features = ["local-offset"] }
 walkdir = "2.5.0"
 xz2 = "0.1.7"
-zip = { version = "8.6.0", features = ["aes-crypto", "deflate", "bzip2", "zstd", "time"] }
+zip = { version = "9.0.4", features = ["aes-crypto", "deflate", "bzip2", "zstd", "time"] }
 zstd = { version = "0.14.0", features = ["zstdmt"] }
 
 [dev-dependencies]
 tar = "0.4.46"
 tempfile = "3.27.0"
 walkdir = "2.5.0"
-zip = "8.6.0"
+zip = "9.0.4"

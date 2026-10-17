@@ -556,6 +556,41 @@ fn multithreaded_stream_formats_roundtrip() {
     }
 }
 
+/// 標記為 UTF-8、名稱卻不是合法 UTF-8 的 zip（損壞或其他工具產生）：仍能列出與解壓縮，不會整個打不開
+#[test]
+fn invalid_utf8_name_with_utf8_flag() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ar = tmp.path().join("bad.zip");
+    zip_with(&ar, &[("ZZZZ.txt", b"data"), ("ok.txt", b"ok")]);
+    let mut bytes = fs::read(&ar).unwrap();
+    let mut n = 0;
+    for i in 0..bytes.len().saturating_sub(4) {
+        if &bytes[i..i + 4] == b"ZZZZ" {
+            bytes[i..i + 4].copy_from_slice(&[0xC3, 0x28, b'A', b'B']);
+            n += 1;
+        }
+    }
+    assert_eq!(n, 2, "本機標頭與中央目錄各一次");
+    // 所有項目都設定「名稱為 UTF-8」旗標（本機標頭在第 6 位元組、中央目錄在第 8 位元組）
+    for i in 0..bytes.len().saturating_sub(10) {
+        let at = match &bytes[i..i + 4] {
+            [0x50, 0x4B, 0x03, 0x04] => i + 6,
+            [0x50, 0x4B, 0x01, 0x02] => i + 8,
+            _ => continue,
+        };
+        bytes[at + 1] |= 0x08;
+    }
+    fs::write(&ar, bytes).unwrap();
+
+    let names: Vec<String> = list(&ar, None).unwrap().into_iter().map(|e| e.name).collect();
+    assert_eq!(names.len(), 2, "{names:?}");
+    assert!(names.iter().any(|n| n.ends_with("AB.txt")), "{names:?}");
+    let out = tmp.path().join("out");
+    x(&ar, &out, None).unwrap();
+    assert_eq!(fs::read(out.join("ok.txt")).unwrap(), b"ok");
+    assert_eq!(fs::read_dir(&out).unwrap().count(), 2);
+}
+
 /// 模擬 Windows 內建壓縮在繁體中文系統上產生的 zip：檔名以 Big5 儲存，沒有 UTF-8 標記。
 #[test]
 fn legacy_big5_zip_names() {
