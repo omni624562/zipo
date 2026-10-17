@@ -49,6 +49,13 @@ CI 無法涵蓋，只有改到相關功能時才需要，請使用者在自己�
 - 工作列進度、檔案總管右鍵選單：手動確認
 - 壓縮速度的比較：CI 機器效能不穩定，要在固定的機器上交替執行多次比較
 
+使用者電腦的環境（重新 clone 後在本機執行時）：
+
+- 預設 Rust 工具鏈是 `stable-i686-pc-windows-msvc`（32 位元），已另裝 `x86_64-pc-windows-msvc` 目標；64 位元版用 `--target x86_64-pc-windows-msvc`，兩種架構都要測。
+- 本機 Rust 可能比 CI 舊，新版 clippy 規則抓不到，以 CI 結果為準。
+- 沒有 CMake，`cargo install cargo-audit` 會失敗；安全檢查看 CI。
+- gh CLI 在 `C:\Program Files\GitHub CLI\gh.exe`（不在 Git Bash 的 PATH）。
+
 ## 記憶體與效能注意事項
 
 - 執行緒數依記憶體預算決定（`util::reserve_threads`：實體記憶體的一半與目前可用記憶體取小者；32 位元最多 1.5 GB）。高等級 LZMA 每個執行緒將近 1 GB，只依核心數開執行緒會配置失敗而當掉。
