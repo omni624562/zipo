@@ -65,3 +65,41 @@ jobs:
       - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  # 試行：在沒有顯示卡的 Windows 執行器上截取 GUI 畫面（debug 版的截圖工具），結果以 artifact 下載檢查。
+  # 執行器能否畫出視窗仍待確認，失敗時不影響 CI 結果。
+  screenshot:
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: 建置
+        run: cargo build -p ziptool-gui -p ziptool
+      - name: 截圖
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory shots | Out-Null
+          & target/debug/zipo.exe a sample.zip crates docs -bd | Out-Null
+          $cases = @(
+            @{ Name = 'folder'; Env = @{ ZIPTOOL_SHOT_OPEN = "$PWD"; ZIPTOOL_SHOT_SELECT = '2' } },
+            @{ Name = 'archive'; Env = @{ ZIPTOOL_SHOT_OPEN = "$PWD\sample.zip" } },
+            @{ Name = 'add-dialog-dark'; Env = @{ ZIPTOOL_SHOT_OPEN = "$PWD"; ZIPTOOL_SHOT_SELECT = '2'; ZIPTOOL_SHOT_DIALOG = 'add'; ZIPTOOL_SHOT_DARK = '1' } },
+            @{ Name = 'extract-dialog-en'; Env = @{ ZIPTOOL_SHOT_OPEN = "$PWD\sample.zip"; ZIPTOOL_SHOT_DIALOG = 'extract'; ZIPTOOL_SHOT_LANG = 'en' } }
+          )
+          $failed = 0
+          foreach ($c in $cases) {
+            $env:ZIPTOOL_SHOT = "$PWD\shots\$($c.Name).png"
+            foreach ($k in 'ZIPTOOL_SHOT_OPEN', 'ZIPTOOL_SHOT_SELECT', 'ZIPTOOL_SHOT_DIALOG', 'ZIPTOOL_SHOT_DARK', 'ZIPTOOL_SHOT_LANG') { Remove-Item "Env:$k" -ErrorAction SilentlyContinue }
+            foreach ($k in $c.Env.Keys) { Set-Item "Env:$k" $c.Env[$k] }
+            $p = Start-Process target/debug/zipo-gui.exe -PassThru -RedirectStandardError "shots\$($c.Name).log"
+            if (-not $p.WaitForExit(90000)) { $p.Kill(); "逾時：$($c.Name)" }
+            if (Test-Path $env:ZIPTOOL_SHOT) { "完成：$($c.Name)" } else { "沒有產生截圖：$($c.Name)"; $failed++ }
+          }
+          exit $failed
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: screenshots
+          path: shots/
