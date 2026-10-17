@@ -861,8 +861,10 @@ fn tar_non_ascii_names_use_pax_headers() {
     x(&ar, &out, None).unwrap();
     assert_eq!(fs::read_to_string(out.join("中文資料夾/中文檔名.txt")).unwrap(), "內容");
 
-    // Windows 內建的 tar.exe 也解得開
-    #[cfg(windows)]
+    // Windows 內建的 tar.exe 也解得開。
+    // Windows Arm 執行器上的 tar.exe 讀不出 pax 標頭中的非 ASCII 名稱（同一個檔案在 x64 的 tar.exe 正常），
+    // 是該工具的差異，所以 Arm64 不比對。
+    #[cfg(all(windows, not(target_arch = "aarch64")))]
     {
         let bsdtar = Path::new(&std::env::var("SystemRoot").unwrap()).join(r"System32\tar.exe");
         if bsdtar.is_file() {
