@@ -177,6 +177,13 @@ fn run_app() -> eframe::Result {
 
 /// 搜尋框的 id（Ctrl+F 把游標移到這裡）
 const SEARCH_BOX: &str = "search_box";
+/// 搜尋框的寬度
+const SEARCH_W: f32 = 240.0;
+
+/// 搜尋框的提示文字；壓縮檔內的搜尋包含子資料夾，寫在滑鼠提示裡（提示文字太長會被截斷）
+fn search_hint(here: &str) -> String {
+    F!("搜尋 {here}", "Search {here}")
+}
 
 /// 從命令列（例如檔案總管右鍵選單）啟動時要做的事。
 #[derive(Debug, PartialEq)]
@@ -2044,15 +2051,16 @@ impl App {
             }
             ui.add_space(4.0);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.allocate_ui_with_layout(vec2(240.0, CONTROL_H), Layout::left_to_right(Align::Center), |ui| {
+                ui.allocate_ui_with_layout(vec2(SEARCH_W, CONTROL_H), Layout::left_to_right(Align::Center), |ui| {
                     input_frame(ui, icon::MAGNIFYING_GLASS, |ui| {
                         let r = ui.add(
                             egui::TextEdit::singleline(&mut self.filter)
                                 .id(egui::Id::new(SEARCH_BOX))
                                 .frame(egui::Frame::NONE)
-                                .hint_text(if matches!(self.loc, Location::Archive { .. }) { F!("搜尋 {here}（含子資料夾）", "Search {here} (including subfolders)") } else { F!("搜尋 {here}", "Search {here}") })
+                                .hint_text(search_hint(&here))
                                 .desired_width(ui.available_width()),
                         );
+                        let r = if matches!(self.loc, Location::Archive { .. }) { r.on_hover_text(L!("搜尋範圍包含子資料夾", "Also searches subfolders")) } else { r };
                         filter_changed = r.changed();
                     });
                 });
@@ -3361,6 +3369,23 @@ mod tests {
         std::fs::create_dir(t.path().join("sub")).unwrap();
         std::fs::write(t.path().join("sub").join("only.txt"), "y").unwrap();
         t
+    }
+
+    /// 搜尋框的提示文字在常見長度的壓縮檔名下不會被截斷。
+    /// 用 egui 內建的英數字型量寬度（與 Segoe UI 相近），結果不受這台電腦裝了哪些字型影響；
+    /// 英文比中文長，英文放得下中文也放得下。
+    #[test]
+    fn search_hint_fits_search_box() {
+        let ctx = egui::Context::default();
+        let hint = ziptool_core::i18n::with_language(true, || search_hint("sample.zip"));
+        let mut need = 0.0;
+        let mut out = ctx.run_ui(Default::default(), |ui| {
+            need = ui.painter().layout_no_wrap(hint.clone(), egui::FontId::proportional(14.0), egui::Color32::WHITE).size().x;
+        });
+        out.textures_delta.clear();
+        // 外框左右邊距 10、放大鏡圖示 16、圖示與文字間距 8
+        let room = SEARCH_W - 20.0 - 16.0 - 8.0;
+        assert!(need <= room, "{hint}：需要 {need}，只有 {room}");
     }
 
     #[test]
