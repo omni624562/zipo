@@ -63,3 +63,30 @@ impl DevShot {
         }
     }
 }
+
+/// 截圖時忽略滑鼠：游標剛好停在視窗內時會出現滑過效果或跳出提示框，每次截圖的畫面不同
+pub fn ignore_pointer(raw: &mut egui::RawInput) {
+    raw.events.retain(|e| {
+        !matches!(
+            e,
+            egui::Event::PointerMoved(_) | egui::Event::MouseMoved(_) | egui::Event::PointerButton { .. } | egui::Event::MouseWheel { .. } | egui::Event::Touch { .. }
+        )
+    });
+    raw.events.push(egui::Event::PointerGone);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ignore_pointer_hides_cursor() {
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput::default();
+        raw.events.push(egui::Event::PointerMoved(egui::pos2(100.0, 100.0)));
+        ignore_pointer(&mut raw);
+        let mut out = ctx.run_ui(raw, |_| {});
+        out.textures_delta.clear();
+        assert_eq!(ctx.input(|i| i.pointer.hover_pos()), None);
+    }
+}

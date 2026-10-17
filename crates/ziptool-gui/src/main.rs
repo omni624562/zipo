@@ -3173,6 +3173,13 @@ impl eframe::App for App {
         self.save_settings(storage);
     }
 
+    #[cfg(debug_assertions)]
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if self.devshot.is_some() {
+            devshot::ignore_pointer(raw_input);
+        }
+    }
+
     /// 程式結束時清除本程式建立的暫存資料夾（開啟壓縮檔內的檔案、拖曳到程式外）
     fn on_exit(&mut self) {
         ziptool_core::keep_joined_volumes(false);
