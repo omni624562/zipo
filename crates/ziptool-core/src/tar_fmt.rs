@@ -25,7 +25,7 @@ pub(crate) fn compress(items: &[Item], out: crate::volume::OutFile, format: Form
     match inner_format(format) {
         None => write_tar(file, items, progress)?.flush()?,
         Some(f) => {
-            let enc = encoder(f, file, level)?;
+            let enc = encoder(f, file, level, progress)?;
             write_tar(enc, items, progress)?.finish()?.flush()?;
         }
     }

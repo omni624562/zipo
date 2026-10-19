@@ -230,7 +230,7 @@ pub(crate) fn compress(items: &[Item], out: crate::volume::OutFile, opts: &Compr
     // 所有核心都有工作（原本固定為字典 × 4，一個區塊只能分給 4～8 個執行緒）；最小為字典大小。
     // 實測 580 MB、等級 5、22 核心：59 秒 → 約 40 秒，壓縮檔只大 0.1%。
     let dict = dict_size(level);
-    let (threads, _mem) = crate::util::reserve_threads(dict * 12 + dict * 4);
+    let (threads, _mem) = crate::util::reserve_compression_threads(dict * 12 + dict * 4, progress)?;
     let chunk = (SPLIT_BYTES / u64::from(threads.max(1))).clamp(dict, dict * 4);
     let lzma2 = Lzma2Options::from_level_mt(level, threads, chunk);
     match &opts.password {
