@@ -2602,10 +2602,9 @@ impl App {
     }
 
     fn handle_drops(&mut self, ctx: &egui::Context) {
-        // 從 Zipo 拖曳出去的暫存檔又被放回視窗時忽略，避免加入壓縮檔
-        let own = std::env::temp_dir().join("Zipo");
+        // 這個視窗拖曳出去的暫存檔又被放回時忽略，避免加入壓縮檔；其他 Zipo 視窗拖過來的照常接受
         let dropped: Vec<PathBuf> =
-            ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.starts_with(&own)).collect());
+            ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !own_temp_file(p)).collect());
         if dropped.is_empty() || self.busy() {
             return;
         }
@@ -3119,6 +3118,17 @@ fn unix_now() -> u64 {
 /// 清除開啟壓縮檔內檔案時留下的暫存資料夾：
 /// `only_mine` 為真時刪除本程序建立的；否則刪除超過一天的舊資料夾（上次異常結束留下的）。
 /// 檔案仍被其他程式開著時刪除會失敗，直接略過。
+/// 這個 Zipo 建立的暫存檔：暫存資料夾 `Zipo` 底下，名稱以本行程編號開頭（`{編號}-…`、複製用的 `clip-{編號}-…`）
+fn own_temp_file(p: &Path) -> bool {
+    let prefix = format!("{}-", std::process::id());
+    let base = std::env::temp_dir().join("Zipo");
+    let first = p.strip_prefix(&base).ok().and_then(|rest| rest.components().next());
+    first.is_some_and(|c| {
+        let name = c.as_os_str().to_string_lossy();
+        name.starts_with(&prefix) || name.strip_prefix("clip-").is_some_and(|n| n.starts_with(&prefix))
+    })
+}
+
 fn cleanup_temp(only_mine: bool) {
     cleanup_temp_in(&std::env::temp_dir().join("Zipo"), only_mine);
 }
@@ -4849,7 +4859,8 @@ mod drag_out_tests {
         }
     }
 
-    /// 從 Zipo 拖出去的暫存檔被放回視窗時忽略；一般檔案照常加入
+    /// 這個視窗拖出去的暫存檔被放回時忽略（避免把剛解出的檔案加回壓縮檔）；
+    /// 從另一個 Zipo 視窗拖過來的、一般檔案照常加入
     #[test]
     fn own_temp_files_dropped_back_are_ignored() {
         let t = tempfile::tempdir().unwrap();
@@ -4860,8 +4871,21 @@ mod drag_out_tests {
             let mut out = ctx.run_ui(raw, |ui| app.handle_drops(ui.ctx()));
             out.textures_delta.clear();
         };
-        drop(&mut app, std::env::temp_dir().join("Zipo").join("1-drag-2").join("a.txt"));
+        let base = std::env::temp_dir().join("Zipo");
+        let pid = std::process::id();
+        drop(&mut app, base.join(format!("{pid}-drag-2")).join("a.txt"));
         assert!(app.dialog.is_none(), "不應出現加入確認");
+
+        // 另一個 Zipo 視窗（行程編號不同）拖過來的
+        let from_other = base.join(format!("{}-drag-test", pid.wrapping_add(1)));
+        std::fs::create_dir_all(&from_other).unwrap();
+        std::fs::write(from_other.join("a.txt"), "x").unwrap();
+        drop(&mut app, from_other.join("a.txt"));
+        let accepted = matches!(app.dialog, Some(Dialog::ConfirmUpdate { .. }));
+        let _ = std::fs::remove_dir_all(&from_other);
+        assert!(accepted, "從其他 Zipo 視窗拖過來的要能加入");
+        app.dialog = None;
+
         let other = t.path().join("other.txt");
         std::fs::write(&other, "x").unwrap();
         drop(&mut app, other);
