@@ -747,6 +747,62 @@ fn update_add_replace_remove() {
     }
 }
 
+/// 兩個 Zipo（圖形介面或命令列）同時寫入同一個壓縮檔時，後來的要被拒絕，
+/// 否則兩邊寫進同一個暫存檔，產生損壞的壓縮檔。先開始的照常完成。
+#[test]
+fn concurrent_writes_to_same_archive_are_refused() {
+    /// 第一次 start 時暫停，直到測試讓它繼續：模擬另一個 Zipo 正在寫入
+    struct Pause {
+        gate: std::sync::Barrier,
+        started: AtomicBool,
+    }
+    impl Progress for Pause {
+        fn start(&self, _: u64) {
+            if !self.started.swap(true, Ordering::SeqCst) {
+                self.gate.wait();
+                self.gate.wait();
+            }
+        }
+    }
+    let pause = || Pause { gate: std::sync::Barrier::new(2), started: AtomicBool::new(false) };
+    let opts = CompressOptions::default();
+    for f in [Format::Zip, Format::SevenZ, Format::TarGz] {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = make_tree(tmp.path());
+        let ar = tmp.path().join(format!("t.{}", f.extension()));
+        let extra = tmp.path().join("extra.txt");
+        fs::write(&extra, "新增的檔案").unwrap();
+
+        // 先讓暫停中的工作繼續、結束後才檢查，檢查失敗時測試不會卡住
+        let p = pause();
+        let (first, second) = std::thread::scope(|s| {
+            let first = s.spawn(|| compress(std::slice::from_ref(&src), &ar, f, &opts, &p));
+            p.gate.wait();
+            let second = compress(std::slice::from_ref(&src), &ar, f, &opts, &NoProgress);
+            p.gate.wait();
+            (first.join().unwrap(), second)
+        });
+        assert!(matches!(second, Err(Error::Busy(_))), "{f:?} 壓縮：{second:?}");
+        first.unwrap_or_else(|e| panic!("{f:?}: {e}"));
+
+        let p = pause();
+        let (first, second) = std::thread::scope(|s| {
+            let first = s.spawn(|| update(&ar, std::slice::from_ref(&extra), "", &[], &opts, &p));
+            p.gate.wait();
+            let second = update(&ar, &[], "", &["src/a.txt".into()], &opts, &NoProgress);
+            p.gate.wait();
+            (first.join().unwrap(), second)
+        });
+        assert!(matches!(second, Err(Error::Busy(_))), "{f:?} 更新：{second:?}");
+        first.unwrap_or_else(|e| panic!("{f:?}: {e}"));
+
+        let out = tmp.path().join("out");
+        x(&ar, &out, None).unwrap();
+        assert_same_tree(&src, &out.join("src"));
+        assert_eq!(fs::read_to_string(out.join("extra.txt")).unwrap(), "新增的檔案", "{f:?}");
+    }
+}
+
 #[test]
 fn update_encrypted_zip_requires_the_same_password() {
     let tmp = tempfile::tempdir().unwrap();

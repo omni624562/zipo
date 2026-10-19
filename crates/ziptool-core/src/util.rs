@@ -151,6 +151,48 @@ pub(crate) fn sanitize_component(c: &str) -> String {
     c.replace('\0', "_")
 }
 
+/// 跨程式的寫入鎖：同一個輸出檔同時只能有一個 Zipo（圖形介面或命令列）寫入，
+/// 否則兩邊會寫進同一個暫存檔（[`part_path`]），產生損壞的壓縮檔。釋放時機是結束時關閉檔案。
+///
+/// 鎖檔放在暫存資料夾的 `Zipo/locks`（[`crate::LOCK_DIR`]），以輸出路徑的雜湊命名，不在使用者的資料夾留下檔案。
+/// 用完不刪除：刪除後，另一個已開啟舊檔的 Zipo 會鎖住已刪除的檔案，而第三個 Zipo 又鎖住新建的檔案，兩邊都以為拿到了鎖。
+pub(crate) struct WriteLock {
+    _file: Option<File>,
+}
+
+impl WriteLock {
+    /// 另一個 Zipo 正在寫入同一個檔案時回傳 [`Error::Busy`]。
+    /// 暫存資料夾無法寫入或不支援鎖定時不上鎖、照常進行：不因為少見的同時寫入，讓每次壓縮都失敗。
+    pub(crate) fn acquire(target: &Path) -> Result<Self> {
+        let dir = std::env::temp_dir().join("Zipo").join(crate::LOCK_DIR);
+        let file = std::fs::create_dir_all(&dir)
+            .and_then(|()| std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join(lock_name(target))));
+        let Ok(file) = file else { return Ok(Self { _file: None }) };
+        match file.try_lock() {
+            Ok(()) => Ok(Self { _file: Some(file) }),
+            Err(std::fs::TryLockError::WouldBlock) => Err(Error::Busy(target.to_path_buf())),
+            Err(std::fs::TryLockError::Error(_)) => Ok(Self { _file: None }),
+        }
+    }
+}
+
+/// 鎖檔名稱：同一個檔案不論寫法（相對路徑、`..`、符號連結的資料夾、Windows 上的大小寫）都得到相同名稱
+fn lock_name(target: &Path) -> String {
+    let abs = std::path::absolute(target).unwrap_or_else(|_| target.to_path_buf());
+    // 輸出檔可能還不存在，所以只正規化所在的資料夾
+    let path = match (abs.parent().and_then(|d| d.canonicalize().ok()), abs.file_name()) {
+        (Some(dir), Some(name)) => dir.join(name),
+        _ => abs,
+    };
+    let mut key = path.to_string_lossy().into_owned();
+    if cfg!(windows) {
+        key = key.to_lowercase();
+    }
+    // FNV-1a：不同版本、不同執行檔（圖形介面與命令列）都算出相同的值，std 的雜湊不保證這點
+    let hash = key.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
+    format!("{hash:016x}.lock")
+}
+
 /// 寫入中的暫存檔名：完成後才改名為正式名稱。
 pub(crate) fn part_path(path: &Path) -> PathBuf {
     let mut name = path.file_name().map(|n| n.to_os_string()).unwrap_or_default();
@@ -699,6 +741,22 @@ pub(crate) fn from_zip_time(d: Option<zip::DateTime>) -> Option<SystemTime> {
 mod tests {
     use super::*;
     use crate::NoProgress;
+
+    /// 同一個檔案的不同寫法共用一個鎖；不同檔案各自獨立
+    #[test]
+    fn write_lock_is_per_file() {
+        let t = tempfile::tempdir().unwrap();
+        std::fs::create_dir(t.path().join("sub")).unwrap();
+        let ar = t.path().join("a.zip");
+        assert_eq!(lock_name(&ar), lock_name(&t.path().join("sub").join("..").join("a.zip")));
+        assert_ne!(lock_name(&ar), lock_name(&t.path().join("b.zip")));
+
+        let held = WriteLock::acquire(&ar).unwrap();
+        assert!(matches!(WriteLock::acquire(&t.path().join("sub").join("..").join("a.zip")), Err(Error::Busy(_))));
+        assert!(WriteLock::acquire(&t.path().join("b.zip")).is_ok(), "其他檔案不受影響");
+        drop(held);
+        assert!(WriteLock::acquire(&ar).is_ok(), "結束後可以再寫入");
+    }
 
     #[test]
     fn write_limit_stops_stream_bombs() {
