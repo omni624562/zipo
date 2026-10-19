@@ -164,16 +164,20 @@ impl WriteLock {
     /// 另一個 Zipo 正在寫入同一個檔案時回傳 [`Error::Busy`]。
     /// 暫存資料夾無法寫入或不支援鎖定時不上鎖、照常進行：不因為少見的同時寫入，讓每次壓縮都失敗。
     pub(crate) fn acquire(target: &Path) -> Result<Self> {
-        let dir = std::env::temp_dir().join("Zipo").join(crate::LOCK_DIR);
-        let file = std::fs::create_dir_all(&dir)
-            .and_then(|()| std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join(lock_name(target))));
-        let Ok(file) = file else { return Ok(Self { _file: None }) };
+        let Ok(file) = open_lock_file(&lock_name(target)) else { return Ok(Self { _file: None }) };
         match file.try_lock() {
             Ok(()) => Ok(Self { _file: Some(file) }),
             Err(std::fs::TryLockError::WouldBlock) => Err(Error::Busy(target.to_path_buf())),
             Err(std::fs::TryLockError::Error(_)) => Ok(Self { _file: None }),
         }
     }
+}
+
+/// 開啟（不存在就建立）`Zipo/locks` 底下的鎖檔
+fn open_lock_file(name: &str) -> io::Result<File> {
+    let dir = std::env::temp_dir().join("Zipo").join(crate::LOCK_DIR);
+    std::fs::create_dir_all(&dir)?;
+    std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join(name))
 }
 
 /// 鎖檔名稱：同一個檔案不論寫法（相對路徑、`..`、符號連結的資料夾、Windows 上的大小寫）都得到相同名稱
@@ -640,21 +644,64 @@ fn plan_threads(budget: u64, used: u64, per_thread: u64, cores: u64) -> u64 {
 /// 否則每個工作都以為可以用掉全部預算，同時壓縮多個檔案時（32 位元程式尤其明顯）會耗盡記憶體。
 static RESERVED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// 保留的記憶體；丟棄時歸還
+/// 保留的記憶體；丟棄時歸還（連同 [`reserve_compression_threads`] 取得的跨程式的鎖）
 #[must_use]
-pub(crate) struct MemoryReservation(u64);
+pub(crate) struct MemoryReservation {
+    amount: u64,
+    _gate: Option<File>,
+}
 
 impl Drop for MemoryReservation {
     fn drop(&mut self) {
-        RESERVED.fetch_sub(self.0, std::sync::atomic::Ordering::SeqCst);
+        RESERVED.fetch_sub(self.amount, std::sync::atomic::Ordering::SeqCst);
     }
+}
+
+/// 壓縮用的 [`reserve_threads`]：這個工作會用掉一半以上的記憶體預算時，先等其他 Zipo 的同類工作結束。
+/// 記憶體預算只計算自己這個程式保留的部分；兩個 Zipo 同時開始時看到相同的可用記憶體，
+/// 合計會超出而配置失敗、當掉。等待中顯示訊息，並可取消。小工作不必等待。
+pub(crate) fn reserve_compression_threads(per_thread: u64, progress: &dyn Progress) -> Result<(u32, MemoryReservation)> {
+    let cores = cpu_cores();
+    let gate = if per_thread.saturating_mul(cores) > memory_budget() / 2 { wait_memory_gate(progress)? } else { None };
+    // 等待期間其他 Zipo 已釋放記憶體，等完才計算預算
+    Ok(reserve_with(per_thread, cores, gate))
+}
+
+/// 取得大量記憶體工作的跨程式鎖；其他 Zipo 持有時每 0.2 秒再試一次。
+/// 暫存資料夾無法使用或不支援鎖定時不等待，照常進行。
+fn wait_memory_gate(progress: &dyn Progress) -> Result<Option<File>> {
+    let Ok(file) = open_lock_file("memory.lock") else { return Ok(None) };
+    let mut told = false;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(Some(file)),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                if !told {
+                    progress.entry(L!("等待其他 Zipo 的壓縮工作完成…", "Waiting for another Zipo to finish compressing…"));
+                    told = true;
+                }
+                if progress.is_cancelled() {
+                    return Err(Error::Cancelled);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            Err(std::fs::TryLockError::Error(_)) => return Ok(None),
+        }
+    }
+}
+
+fn cpu_cores() -> u64 {
+    std::thread::available_parallelism().map(|n| n.get() as u64).unwrap_or(1)
 }
 
 /// 依「尚未被其他工作保留」的記憶體預算決定執行緒數（每個執行緒約需 `per_thread` 位元組），
 /// 至少 1 個、最多 CPU 核心數，並保留對應的記憶體直到回傳的保留物被丟棄。
 pub(crate) fn reserve_threads(per_thread: u64) -> (u32, MemoryReservation) {
+    reserve_with(per_thread, cpu_cores(), None)
+}
+
+fn reserve_with(per_thread: u64, cores: u64, gate: Option<File>) -> (u32, MemoryReservation) {
     use std::sync::atomic::Ordering;
-    let cores = std::thread::available_parallelism().map(|n| n.get() as u64).unwrap_or(1);
     let per = per_thread.max(1);
     let budget = memory_budget();
     let mut used = RESERVED.load(Ordering::SeqCst);
@@ -662,7 +709,7 @@ pub(crate) fn reserve_threads(per_thread: u64) -> (u32, MemoryReservation) {
         let threads = plan_threads(budget, used, per, cores);
         let amount = threads.saturating_mul(per);
         match RESERVED.compare_exchange(used, used.saturating_add(amount), Ordering::SeqCst, Ordering::SeqCst) {
-            Ok(_) => return (threads as u32, MemoryReservation(amount)),
+            Ok(_) => return (threads as u32, MemoryReservation { amount, _gate: gate }),
             Err(now) => used = now,
         }
     }
@@ -836,6 +883,33 @@ mod tests {
         assert_eq!(budget_from(32 * GB, 5 * GB, false), 5 * GB, "可用的不多：以可用的為上限");
         assert_eq!(budget_from(32 * GB, 30 * GB, true), 1536 << 20, "32 位元最多 1.5 GB");
         assert_eq!(budget_from(32 * GB, 0, false), 256 << 20, "至少保留一點，仍能以單執行緒進行");
+    }
+
+    /// 另一個 Zipo 正在進行用掉大半記憶體的壓縮時，後來的要等它結束（等待中可取消），
+    /// 否則兩邊看到相同的可用記憶體，合計超出而配置失敗、當掉。小工作不必等待。
+    #[test]
+    fn heavy_compression_waits_for_other_zipo() {
+        #[derive(Default)]
+        struct Watch(std::sync::Mutex<Option<String>>);
+        impl Progress for Watch {
+            fn entry(&self, name: &str) {
+                *self.0.lock().unwrap() = Some(name.to_string());
+            }
+            /// 一顯示等待訊息就取消
+            fn is_cancelled(&self) -> bool {
+                self.0.lock().unwrap().is_some()
+            }
+        }
+        let heavy = memory_budget();
+        // 模擬另一個 Zipo：鎖是依檔案控制代碼判斷，同一個程式內也能模擬
+        let (_, other) = reserve_compression_threads(heavy, &NoProgress).unwrap();
+        let w = Watch::default();
+        let r = reserve_compression_threads(heavy, &w);
+        assert!(matches!(r, Err(Error::Cancelled)), "應等待其他 Zipo：{:?}", r.map(|(t, _)| t));
+        assert!(w.0.lock().unwrap().as_deref().is_some_and(|m| m.contains("Zipo")), "等待時要告訴使用者");
+        assert!(reserve_compression_threads(1, &NoProgress).is_ok(), "小工作不必等待");
+        drop(other);
+        assert!(reserve_compression_threads(heavy, &NoProgress).is_ok(), "結束後可以開始");
     }
 
     /// 同時進行的工作共用記憶體預算：預算被占用時，後來的工作只能用較少的執行緒；歸還後恢復

@@ -48,7 +48,7 @@ impl<W: Write> Write for Encoder<W> {
 }
 
 /// `level` 為 0–9，依各演算法換算。
-pub(crate) fn encoder<W: Write>(f: Format, w: W, level: Option<u32>) -> Result<Encoder<W>> {
+pub(crate) fn encoder<W: Write>(f: Format, w: W, level: Option<u32>, progress: &dyn Progress) -> Result<Encoder<W>> {
     Ok(match f {
         Format::Gz => Encoder::Gz(flate2::write::GzEncoder::new(
             w,
@@ -63,7 +63,7 @@ pub(crate) fn encoder<W: Write>(f: Format, w: W, level: Option<u32>) -> Result<E
             // 多執行緒 xz：輸出仍是標準 .xz，任何 xz 工具都能解開；建立失敗時退回單執行緒。
             // 每個執行緒約需「字典 × 12 ＋ 2 個區塊（區塊為字典的 3 倍）」的記憶體。
             let dict = xz_dict_size(preset);
-            let (threads, mem) = crate::util::reserve_threads(dict * 18);
+            let (threads, mem) = crate::util::reserve_compression_threads(dict * 18, progress)?;
             let mt = xz2::stream::MtStreamBuilder::new()
                 .threads(threads)
                 .block_size(dict * 3)
@@ -123,7 +123,7 @@ pub(crate) fn compress(
     progress: &dyn Progress,
 ) -> Result<()> {
     progress.entry(&item.name);
-    let mut enc = encoder(format, BufWriter::new(out), level)?;
+    let mut enc = encoder(format, BufWriter::new(out), level, progress)?;
     let mut r = ProgressReader::new(BufReader::new(File::open(&item.path)?), progress);
     io::copy(&mut r, &mut enc)?;
     enc.finish()?.flush()?;
