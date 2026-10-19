@@ -178,15 +178,45 @@ fn install_from_zip(zip: &Path, asset: &Asset, unpack: &Path, current_exe: &Path
     ziptool_core::extract(zip, unpack, &Default::default(), &ziptool_core::NoProgress).map_err(|e| F!("無法解開更新檔：{e}。請再試一次，或到下載頁面手動更新。", "Cannot unpack the update: {e}. Try again, or update manually from the download page."))?;
     let gui = find_file(unpack, "zipo-gui.exe").ok_or(L!("更新檔中找不到 zipo-gui.exe", "zipo-gui.exe was not found in the update"))?;
     let dir = current_exe.parent().ok_or(L!("找不到程式所在的資料夾，請到下載頁面手動更新", "Cannot find the program's folder; update manually from the download page"))?;
-    replace_file(&gui, current_exe)?;
+    let mut pairs = vec![(gui, current_exe.to_path_buf())];
     // 同一個資料夾中的命令列版本一併更新
     let cli_target = dir.join("zipo.exe");
     if cli_target.is_file()
         && let Some(cli) = find_file(unpack, "zipo.exe")
     {
-        replace_file(&cli, &cli_target)?;
+        pairs.push((cli, cli_target));
     }
+    replace_all(&pairs)?;
     Ok(current_exe.to_path_buf())
+}
+
+/// 依序以 `(新檔, 目標)` 取代執行檔，全部成功或全部不變：任何一個失敗時，已換掉的全部還原，
+/// 不會只更新圖形介面、命令列仍是舊版。
+fn replace_all(pairs: &[(PathBuf, PathBuf)]) -> Result<(), String> {
+    // 先清掉上次更新留下的舊執行檔。刪不掉通常是上次更新前開啟的 Zipo 還在執行（Windows 無法刪除執行中的程式），
+    // 這時取代一定失敗，所以在動到任何檔案之前就停下
+    for (_, target) in pairs {
+        let old = old_path(target);
+        if let Err(e) = std::fs::remove_file(&old)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(F!(
+                "無法刪除上次更新留下的「{}」：可能有上次更新前開啟的 Zipo 還在執行，請關閉所有 Zipo 視窗後再更新；或沒有權限，請到下載頁面手動更新。",
+                "Cannot delete \"{}\" left over from the last update: a Zipo window opened before the last update may still be running, so close all Zipo windows and update again; or you lack permission, so update manually from the download page.",
+                old.display()
+            ));
+        }
+    }
+    for (i, (new, target)) in pairs.iter().enumerate() {
+        if let Err(e) = replace_file(new, target) {
+            for (_, done) in pairs[..i].iter().rev() {
+                let _ = std::fs::remove_file(done);
+                let _ = std::fs::rename(old_path(done), done);
+            }
+            return Err(e);
+        }
+    }
+    Ok(())
 }
 
 fn find_file(dir: &Path, name: &str) -> Option<PathBuf> {
@@ -294,6 +324,47 @@ mod tests {
         // 說明頁面不在本儲存庫：整個回應不採用
         assert!(parse_release(&api_json(name, &url, &format!("sha256:{sha}"), "https://evil.example/")).is_err());
         assert!(parse_release(b"not json").is_err());
+    }
+
+    /// 上次更新留下的舊執行檔刪不掉（上次更新前開啟的 Zipo 還在執行）時，什麼都不換，並說明原因；
+    /// 不可只換掉圖形介面、命令列維持舊版
+    #[test]
+    fn install_refuses_while_old_exe_is_in_use() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = tmp.path().join("app");
+        std::fs::create_dir(&app).unwrap();
+        let (gui, cli) = (app.join("zipo-gui.exe"), app.join("zipo.exe"));
+        std::fs::write(&gui, "舊版圖形介面").unwrap();
+        std::fs::write(&cli, "舊版命令列").unwrap();
+        // 刪不掉的 zipo.exe.old（以非空資料夾模擬執行中的舊檔）
+        std::fs::create_dir(old_path(&cli)).unwrap();
+        std::fs::write(old_path(&cli).join("x"), "").unwrap();
+        let (new_gui, new_cli) = (tmp.path().join("new-gui"), tmp.path().join("new-cli"));
+        std::fs::write(&new_gui, "新版圖形介面").unwrap();
+        std::fs::write(&new_cli, "新版命令列").unwrap();
+
+        let e = replace_all(&[(new_gui, gui.clone()), (new_cli, cli.clone())]).unwrap_err();
+        // 要指出是哪個舊檔刪不掉（否則 Windows 上只會看到誤導的「沒有權限」）
+        assert!(e.contains(&old_path(&cli).display().to_string()), "{e}");
+        assert_eq!(std::fs::read_to_string(&gui).unwrap(), "舊版圖形介面", "圖形介面不可先被換掉");
+        assert_eq!(std::fs::read_to_string(&cli).unwrap(), "舊版命令列");
+    }
+
+    /// 換到一半失敗（例如命令列複製失敗）時，已換掉的圖形介面要還原
+    #[test]
+    fn install_rolls_back_when_a_later_file_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (gui, cli) = (tmp.path().join("zipo-gui.exe"), tmp.path().join("zipo.exe"));
+        std::fs::write(&gui, "舊版圖形介面").unwrap();
+        std::fs::write(&cli, "舊版命令列").unwrap();
+        let new_gui = tmp.path().join("new-gui");
+        std::fs::write(&new_gui, "新版圖形介面").unwrap();
+        let missing = tmp.path().join("不存在的新版命令列");
+
+        replace_all(&[(new_gui, gui.clone()), (missing, cli.clone())]).unwrap_err();
+        assert_eq!(std::fs::read_to_string(&gui).unwrap(), "舊版圖形介面", "已換掉的要還原");
+        assert_eq!(std::fs::read_to_string(&cli).unwrap(), "舊版命令列");
+        assert!(!old_path(&gui).exists() && !old_path(&cli).exists(), "不留下舊檔");
     }
 
     /// 驗證與取代：SHA-256 不符時不動到任何檔案；正確時取代執行檔並保留舊檔，可清除
