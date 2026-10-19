@@ -141,8 +141,7 @@ fn run_app() -> eframe::Result {
     };
     let Some(start) = start else { return Ok(()) };
     eframe::run_native(
-        // 設定儲存名稱維持舊名，保留使用者原有的設定
-        "ZipTool",
+        APP_ID,
         options,
         Box::new(move |cc| {
             theme::setup(&cc.egui_ctx);
@@ -173,6 +172,17 @@ fn run_app() -> eframe::Result {
             Ok(Box::new(app))
         }),
     )
+}
+
+/// 設定的儲存名稱（eframe 的 app id）。維持舊名，保留使用者原有的設定
+const APP_ID: &str = "ZipTool";
+
+/// 設定檔目前的內容（其他 Zipo 視窗可能剛存過）；讀不到時為空
+fn read_settings_file() -> std::collections::HashMap<String, String> {
+    eframe::storage_dir(APP_ID)
+        .and_then(|d| std::fs::read_to_string(d.join("app.ron")).ok())
+        .and_then(|s| ron::from_str(&s).ok())
+        .unwrap_or_default()
 }
 
 /// 搜尋框的 id（Ctrl+F 把游標移到這裡）
@@ -585,6 +595,8 @@ struct App {
     auto_update: bool,
     /// 上次檢查更新的時間（Unix 秒）
     last_update_check: u64,
+    /// 這個視窗上次讀入或儲存時的設定值（用來分辨哪些設定是這個視窗改的，見 [`App::save_settings`]）
+    settings_seen: std::collections::HashMap<&'static str, String>,
     update_work: Option<UpdateWork>,
     /// 自動檢查找到的新版本，等目前沒有其他對話框或工作時再顯示
     pending_release: Option<update::Release>,
@@ -658,6 +670,7 @@ impl App {
             show_system: false,
             auto_update: true,
             last_update_check: 0,
+            settings_seen: Default::default(),
             update_work: None,
             pending_release: None,
             drag_out: None,
@@ -718,6 +731,7 @@ impl App {
             None => app.navigate(last.or(home).map(Location::Dir).unwrap_or(Location::Computer)),
         }
         app.back.clear();
+        app.settings_seen = app.settings().into_iter().collect();
         cleanup_temp(false);
         app
     }
@@ -763,13 +777,15 @@ impl App {
         self.scroll_to = self.anchor;
     }
 
-    fn save_settings(&self, storage: &mut dyn eframe::Storage) {
+    /// 要儲存的設定
+    fn settings(&self) -> Vec<(&'static str, String)> {
+        let mut v = Vec::new();
         if let Location::Dir(d) = &self.loc {
-            storage.set_string("last_dir", d.display().to_string());
+            v.push(("last_dir", d.display().to_string()));
         } else if let Location::Archive { path, .. } = &self.loc
             && let Some(d) = path.parent()
         {
-            storage.set_string("last_dir", d.display().to_string());
+            v.push(("last_dir", d.display().to_string()));
         }
         let key = match self.sort_key {
             SortKey::Name => "name",
@@ -778,17 +794,34 @@ impl App {
             SortKey::Modified => "modified",
             SortKey::Type => "type",
         };
-        storage.set_string("sort_key", key.into());
-        storage.set_string("sort_asc", if self.sort_asc { "1" } else { "0" }.into());
-        storage.set_string("compress_format", self.add_format.name().into());
-        storage.set_string("add_level", self.add_level.to_string());
-        storage.set_string("show_system", if self.show_system { "1" } else { "0" }.into());
-        storage.set_string("auto_update", if self.auto_update { "1" } else { "0" }.into());
-        storage.set_string("open_after", if self.open_after { "1" } else { "0" }.into());
-        storage.set_string("preview", if self.preview_open { "1" } else { "0" }.into());
-        storage.set_string("language", self.language.key().into());
-        storage.set_string("last_update_check", self.last_update_check.to_string());
-        storage.set_string("zip_codepage", ziptool_core::zip_codepage().map(|c| c.to_string()).unwrap_or_default());
+        let flag = |on: bool| if on { "1" } else { "0" }.to_string();
+        v.push(("sort_key", key.into()));
+        v.push(("sort_asc", flag(self.sort_asc)));
+        v.push(("compress_format", self.add_format.name().into()));
+        v.push(("add_level", self.add_level.to_string()));
+        v.push(("show_system", flag(self.show_system)));
+        v.push(("auto_update", flag(self.auto_update)));
+        v.push(("open_after", flag(self.open_after)));
+        v.push(("preview", flag(self.preview_open)));
+        v.push(("language", self.language.key().into()));
+        v.push(("last_update_check", self.last_update_check.to_string()));
+        v.push(("zip_codepage", ziptool_core::zip_codepage().map(|c| c.to_string()).unwrap_or_default()));
+        v
+    }
+
+    /// 寫入設定。`disk` 是設定檔目前的內容：同時開著的其他 Zipo 視窗可能在這之後改過設定。
+    /// eframe 會把整份設定寫回檔案，只寫自己的值的話，最後關閉的視窗會把其他視窗改的設定蓋回去；
+    /// 所以這個視窗上次儲存後沒改過的項目，採用設定檔中的值。
+    fn save_settings(&mut self, storage: &mut dyn eframe::Storage, disk: &std::collections::HashMap<String, String>) {
+        let mine = self.settings();
+        for (k, v) in &mine {
+            let value = match disk.get(*k) {
+                Some(newer) if self.settings_seen.get(k) == Some(v) => newer.clone(),
+                _ => v.clone(),
+            };
+            storage.set_string(k, value);
+        }
+        self.settings_seen = mine.into_iter().collect();
     }
 
     /// 從命令列或拖放開啟：資料夾直接進入，壓縮檔則打開瀏覽。
@@ -3182,7 +3215,7 @@ impl eframe::App for App {
         if self.devshot.is_some() {
             return;
         }
-        self.save_settings(storage);
+        self.save_settings(storage, &read_settings_file());
     }
 
     #[cfg(debug_assertions)]
@@ -3831,6 +3864,35 @@ mod phase3_tests {
         fn flush(&mut self) {}
     }
 
+    /// 同時開著兩個視窗：這個視窗沒改的設定，不可把另一個視窗剛存的值蓋回去；這個視窗改過的照常寫入
+    #[test]
+    fn settings_keep_changes_from_other_windows() {
+        let mut store = MemStorage::default();
+        eframe::Storage::set_string(&mut store, "language", "zh".into());
+        eframe::Storage::set_string(&mut store, "add_level", "3".into());
+        let mut a = App::with_storage(None, Some(&store));
+        // 另一個視窗把語言改成英文並存檔；這個視窗只改了壓縮等級
+        let disk = HashMap::from([("language".to_string(), "en".to_string()), ("add_level".to_string(), "3".to_string())]);
+        a.add_level = 5;
+        let mut out = MemStorage::default();
+        a.save_settings(&mut out, &disk);
+        assert_eq!(out.0.get("language").map(String::as_str), Some("en"), "另一個視窗改的語言被蓋回去");
+        assert_eq!(out.0.get("add_level").map(String::as_str), Some("5"));
+
+        // 之後這個視窗自己改了語言：照常寫入；壓縮等級已存過、沒再改，採用設定檔中的值
+        a.language = Language::Auto;
+        let disk = HashMap::from([("language".to_string(), "en".to_string()), ("add_level".to_string(), "7".to_string())]);
+        let mut out = MemStorage::default();
+        a.save_settings(&mut out, &disk);
+        assert_eq!(out.0.get("language").map(String::as_str), Some("auto"));
+        assert_eq!(out.0.get("add_level").map(String::as_str), Some("7"));
+
+        // 設定檔讀不到：全部寫入這個視窗的值
+        let mut out = MemStorage::default();
+        a.save_settings(&mut out, &HashMap::new());
+        assert_eq!(out.0.get("add_level").map(String::as_str), Some("5"));
+    }
+
     #[test]
     fn settings_are_remembered() {
         let t = tree();
@@ -3844,7 +3906,7 @@ mod phase3_tests {
             app.add_level = 5;
             app.auto_update = false;
             app.last_update_check = 1234;
-            app.save_settings(&mut store);
+            app.save_settings(&mut store, &HashMap::new());
         }
         let app = App::with_storage(None, Some(&store));
         assert_eq!(app.loc, Location::Dir(root.join("sub")));
@@ -3862,7 +3924,7 @@ mod phase3_tests {
         let mut newer = MemStorage::default();
         let mut chosen = App::with_storage(None, Some(&old));
         chosen.add_format = Format::SevenZ;
-        chosen.save_settings(&mut newer);
+        chosen.save_settings(&mut newer, &HashMap::new());
         eframe::Storage::set_string(&mut newer, "add_format", "7z".into());
         assert_eq!(App::with_storage(None, Some(&newer)).add_format, Format::SevenZ);
         // 選了只能放一個檔案的格式（gz）卻要壓縮多個項目：改用 zip

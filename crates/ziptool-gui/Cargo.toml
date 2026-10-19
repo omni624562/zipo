@@ -9,6 +9,8 @@ path = "src/main.rs"
 
 [dependencies]
 eframe = { version = "0.36.2", features = ["persistence"] }
+# 讀取 eframe 的設定檔（app.ron），與 eframe 使用的版本相同
+ron = "0.12.2"
 egui-phosphor = "0.14.0"
 egui_extras = "0.36"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"] }
