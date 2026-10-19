@@ -6074,7 +6074,7 @@ dependencies = [
 
 [[package]]
 name = "ziptool"
-version = "0.4.12"
+version = "0.4.13"
 dependencies = [
  "anyhow",
  "indicatif",
@@ -6086,7 +6086,7 @@ dependencies = [
 
 [[package]]
 name = "ziptool-core"
-version = "0.4.12"
+version = "0.4.13"
 dependencies = [
  "bzip2",
  "crc32fast",
@@ -6109,7 +6109,7 @@ dependencies = [
 
 [[package]]
 name = "ziptool-gui"
-version = "0.4.12"
+version = "0.4.13"
 dependencies = [
  "drag",
  "eframe",
