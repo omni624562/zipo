@@ -3120,6 +3120,10 @@ fn cleanup_temp_in(base: &Path, only_mine: bool) {
     let prefix = format!("{}-", std::process::id());
     for e in dir.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
+        // 核心的跨程式寫入鎖；刪除會讓兩個 Zipo 同時寫入同一個檔案
+        if name == ziptool_core::LOCK_DIR {
+            continue;
+        }
         let old = e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|d| d > Duration::from_secs(86_400));
         // 名稱開頭是建立它的行程編號（核心接回分割檔的是 zipo-join-編號）；該行程仍在執行就保留
         let owner = name.strip_prefix("zipo-join-").unwrap_or(&name).split('-').next().and_then(|p| p.parse::<u32>().ok());
@@ -3369,6 +3373,25 @@ mod tests {
         std::fs::create_dir(t.path().join("sub")).unwrap();
         std::fs::write(t.path().join("sub").join("only.txt"), "y").unwrap();
         t
+    }
+
+    /// 啟動時的清理不刪除寫入鎖的資料夾（即使已超過一天沒有變動）
+    #[test]
+    fn cleanup_keeps_lock_folder() {
+        let t = tempfile::tempdir().unwrap();
+        let locks = t.path().join(ziptool_core::LOCK_DIR);
+        let stale = t.path().join("stale");
+        for d in [&locks, &stale] {
+            std::fs::create_dir(d).unwrap();
+            #[cfg(windows)]
+            let f = std::os::windows::fs::OpenOptionsExt::custom_flags(std::fs::OpenOptions::new().write(true), 0x0200_0000).open(d).unwrap();
+            #[cfg(not(windows))]
+            let f = std::fs::File::open(d).unwrap();
+            f.set_modified(SystemTime::now() - Duration::from_secs(3 * 86_400)).unwrap();
+        }
+        cleanup_temp_in(t.path(), false);
+        assert!(!stale.exists(), "一般的舊資料夾照常清除");
+        assert!(locks.exists(), "寫入鎖的資料夾不可刪除");
     }
 
     /// 搜尋框的提示文字在常見長度的壓縮檔名下不會被截斷。

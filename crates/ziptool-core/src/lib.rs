@@ -38,6 +38,8 @@ pub enum Error {
     /// 超過 [`ExtractOptions::max_bytes`]
     TooLarge { limit: u64 },
     Cancelled,
+    /// 另一個 Zipo 正在寫入同一個檔案
+    Busy(PathBuf),
 }
 
 // 錯誤訊息依介面語言顯示，所以手動實作（不使用固定文字的 #[error]）
@@ -65,6 +67,7 @@ impl std::fmt::Display for Error {
                 size / (*packed).max(1)
             ),
             Error::Cancelled => L!("已取消", "Cancelled").to_string(),
+            Error::Busy(p) => F!("另一個 Zipo 正在寫入「{}」，請等它完成後再試", "Another Zipo is writing \"{}\"; wait for it to finish and try again", p.display()),
         };
         f.write_str(&text)
     }
@@ -93,6 +96,9 @@ impl From<zip::result::ZipError> for Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// 跨程式寫入鎖的鎖檔資料夾（位於暫存資料夾的 `Zipo` 底下）。圖形介面啟動時的清理不可刪除它。
+pub const LOCK_DIR: &str = "locks";
 
 fn zip_message(e: &zip::result::ZipError) -> String {
     use zip::result::ZipError::*;
@@ -260,6 +266,7 @@ pub fn compress(
             format.name()
         )));
     }
+    let _lock = util::WriteLock::acquire(output)?;
     let part = util::part_path(output);
     progress.start(util::total_size(&items));
     // 分割時直接寫入各分割檔（暫存名稱），不必先產生完整的壓縮檔：省下一倍的磁碟空間與時間
@@ -360,6 +367,8 @@ fn modify(
         remove.iter().any(|r| name == r || name.starts_with(&format!("{r}/"))) || new_names.iter().any(|n| n == name)
     };
 
+    // 非 zip 格式另外用到共用的暫存資料夾（*.ziptool-update），也由這個鎖保護
+    let _lock = util::WriteLock::acquire(archive)?;
     let part = util::part_path(archive);
     // 取代檔案會遺失「從網際網路下載」的標記；之後解出的檔案就不會被 Windows 警告，所以要寫回
     let zone = util::zone_identifier(archive);
